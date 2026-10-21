@@ -1,0 +1,4 @@
+# per-user settings and position
+crab_config.json
+__pycache__/
+*.pyc
