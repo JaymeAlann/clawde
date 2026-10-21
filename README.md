@@ -100,7 +100,7 @@ Then run `claude` once in that same environment and log in. See the [Claude Code
 ### 3. Get Clawde
 
 ```powershell
-git clone https://github.com/<your-username>/clawde.git
+git clone https://github.com/JaymeAlann/clawde.git
 cd clawde
 ```
 
