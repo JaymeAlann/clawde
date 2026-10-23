@@ -16,8 +16,11 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 import tkinter as tk
+
+import meetings
 
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "crab_config.json"
@@ -31,6 +34,11 @@ DEFAULTS = {
     "walk": True,
     "scale": 0,                 # pixel size; 0 = auto from DPI
     "position": None,
+    "meeting_notes": True,      # offer to record + transcribe calls (needs requirements-meetings.txt)
+    "meetings_folder": "",      # blank = Documents\Clawde Meetings
+    "whisper_model": "small",   # tiny | base | small | medium | large-v3
+    "meeting_language": "",     # blank = auto-detect, or e.g. "en"
+    "keep_audio": False,        # keep the WAV files after transcribing
 }
 NO_WINDOW = 0x08000000
 KEY = "#fe01fd"                 # transparent colour key
@@ -102,6 +110,14 @@ def work_area(x, y):
     user32.GetMonitorInfoW(hmon, ctypes.byref(mi))
     r = mi.rcWork
     return r.left, r.top, r.right, r.bottom
+
+
+def open_file(path):
+    """Open with the default app, or Notepad when nothing is registered for the file type."""
+    try:
+        os.startfile(path)
+    except OSError:
+        subprocess.Popen(["notepad.exe", str(path)])
 
 
 def press_win_h():
@@ -521,6 +537,24 @@ def render(p):
         for c in bang | dot:
             put(*c, "#ffd84a")
 
+    if p.get("rec"):
+        # headphones and a blinking REC light
+        band = {(x, y0 - 10) for x in range(11, 21)} | {(10, y0 - 9), (21, y0 - 9), (9, y0 - 8), (22, y0 - 8)}
+        cups = {(x, y) for x in (8, 9) for y in range(y0 - 7, y0 - 4)} | \
+               {(x, y) for x in (22, 23) for y in range(y0 - 7, y0 - 4)}
+        for c in outline_of(cups):
+            if c not in band:
+                put(*c, O)
+        for c in band:
+            put(*c, "#3b3f4a")
+        for c in cups:
+            put(*c, "#565c6b")
+        if (t // 4) % 2 == 0:
+            for c in outline_of({(28, 2), (29, 2), (28, 3), (29, 3)}):
+                put(*c, O)
+            for c in [(28, 2), (29, 2), (28, 3), (29, 3)]:
+                put(*c, "#ff3b3b")
+
     sx = p.get("shift", 0)
     if sx:
         px = {(x + sx, y): c for (x, y), c in px.items() if 0 <= x + sx < 32}
@@ -597,9 +631,11 @@ class Bubble:
         self.visible = False
         self.until = 0
         self.on_click = None
+        self.buttons = []
         self.size = (0, 0)
 
-    def show(self, text, secs=12, on_click=None):
+    def show(self, text, secs=12, on_click=None, actions=None):
+        """actions: [(label, callback)] drawn as buttons under the text."""
         cv = self.cv
         cv.delete("all")
         pad = 10
@@ -607,11 +643,29 @@ class Bubble:
                              font=("Segoe UI", 10), fill="#2a1a14")
         x0, y0, x1, y1 = cv.bbox(tid)
         w, h = x1 + pad, y1 + pad
+        self.buttons = []
+        if actions:
+            bx, by = pad + 2, y1 + 8
+            items = []
+            for i, (label, cb) in enumerate(actions):
+                lid = cv.create_text(bx + 10, by + 5, text=label, anchor="nw",
+                                     font=("Segoe UI Semibold", 9), fill="white" if i == 0 else "#2a1a14")
+                lx0, ly0, lx1, ly1 = cv.bbox(lid)
+                rect = (bx, by, lx1 + 10, ly1 + 5)
+                items.append((lid, rect, i == 0))
+                self.buttons.append((rect, cb))
+                bx = rect[2] + 8
+            for lid, rect, primary in items:
+                cv.create_rectangle(*rect, fill=C if primary else "#f1e4d8", outline=O, width=1)
+                cv.tag_raise(lid)
+            w = max(w, bx + pad - 8)
+            h = by + (items[0][1][3] - items[0][1][1]) + pad
         cv.create_rectangle(2, 2, w, h, fill="#fffaf3", outline=O, width=2)
+        cv.tag_lower(cv.find_all()[-1])
         tx = w // 2
         cv.create_polygon(tx - 8, h - 1, tx + 8, h - 1, tx, h + 9, fill="#fffaf3", outline="")
         cv.create_line(tx - 8, h, tx, h + 9, tx + 8, h, fill=O, width=2)
-        if on_click:
+        if on_click and not actions:
             cv.create_text(w - 6, h - 4, text="click me", anchor="se", font=("Segoe UI", 7), fill="#b8401c")
         cv.tag_raise(tid)
         self.size = (w + 4, h + 12)
@@ -643,8 +697,15 @@ class Bubble:
         y = max(t, y)
         self.win.geometry(f"+{x}+{y}")
 
-    def _click(self, _e):
+    def _click(self, e):
         cb = self.on_click
+        for (x0, y0, x1, y1), action in self.buttons:
+            if x0 <= e.x <= x1 and y0 <= e.y <= y1:
+                cb = action
+                break
+        else:
+            if self.buttons:
+                return
         self.hide()
         if cb:
             cb()
@@ -874,6 +935,17 @@ class CrabApp:
         self.stretch_nagged = False
         self.tip_pending = False
 
+        # meeting notes state
+        self.recorder = None
+        self.rec_app = None
+        self.rec_folder = None
+        self.rec_auto = False
+        self.rec_started_at = None
+        self.rec_last_seen = 0
+        self.meeting_offered = set()
+        self.meeting_jobs = []
+        self.meeting_deps = None
+
         cv = self.cv
         cv.bind("<ButtonPress-1>", self.on_press)
         cv.bind("<B1-Motion>", self.on_motion)
@@ -881,17 +953,9 @@ class CrabApp:
         cv.bind("<Button-3>", self.on_menu)
 
         self.ctx = tk.Menu(root, tearoff=0)
-        self.ctx.add_command(label="Chat (voice)", command=lambda: self.chat.open(voice=True))
-        self.ctx.add_command(label="Chat (type)", command=lambda: self.chat.open())
-        self.ctx.add_command(label="Open Claude Code CLI", command=self.open_cli)
-        self.ctx.add_separator()
         self.walk_var = tk.BooleanVar(value=self.cfg.get("walk", True))
         self.tips_var = tk.BooleanVar(value=self.cfg.get("ai_tips", True))
-        self.ctx.add_checkbutton(label="Wander around", variable=self.walk_var, command=self._toggle_walk)
-        self.ctx.add_checkbutton(label="Smart tips (asks Claude)", variable=self.tips_var, command=self._toggle_tips)
-        self.ctx.add_command(label="Take a nap", command=self._nap)
-        self.ctx.add_separator()
-        self.ctx.add_command(label="Goodbye", command=self.quit)
+        self.meet_var = tk.BooleanVar(value=self.cfg.get("meeting_notes", True))
 
         self.say(f"Hi, I'm {self.cfg['name']}! Hover me for options, drag me anywhere.", 8)
         self.tick()
@@ -906,13 +970,135 @@ class CrabApp:
         self.cfg["ai_tips"] = self.tips_var.get()
         save_config(self.cfg)
 
+    def _toggle_meet(self):
+        self.cfg["meeting_notes"] = self.meet_var.get()
+        save_config(self.cfg)
+
     def _nap(self):
         self.force_sleep = True
 
+    def build_menu(self):
+        m = self.ctx
+        m.delete(0, "end")
+        m.add_command(label="Chat (voice)", command=lambda: self.chat.open(voice=True))
+        m.add_command(label="Chat (type)", command=lambda: self.chat.open())
+        m.add_command(label="Open Claude Code CLI", command=self.open_cli)
+        m.add_separator()
+        if self.recorder:
+            m.add_command(label="Stop recording and write notes", command=self.stop_recording)
+        else:
+            m.add_command(label="Record a meeting now", command=lambda: self.start_recording("Meeting", auto=False))
+        m.add_command(label="Open meeting notes", command=self.open_meetings_folder)
+        m.add_checkbutton(label="Offer to take meeting notes", variable=self.meet_var, command=self._toggle_meet)
+        m.add_separator()
+        m.add_checkbutton(label="Wander around", variable=self.walk_var, command=self._toggle_walk)
+        m.add_checkbutton(label="Smart tips (asks Claude)", variable=self.tips_var, command=self._toggle_tips)
+        m.add_command(label="Take a nap", command=self._nap)
+        m.add_separator()
+        m.add_command(label="Goodbye", command=self.quit)
+
     def quit(self):
+        if self.recorder:
+            self.stop_recording()
         self.cfg["position"] = [self.root.winfo_x(), self.root.winfo_y()]
         save_config(self.cfg)
         self.root.destroy()
+
+    # ---------------- meetings
+    def meetings_base(self):
+        return Path(self.cfg.get("meetings_folder") or Path.home() / "Documents" / "Clawde Meetings")
+
+    def open_meetings_folder(self):
+        base = self.meetings_base()
+        base.mkdir(parents=True, exist_ok=True)
+        os.startfile(base)
+
+    def have_meeting_deps(self):
+        if self.meeting_deps is None:
+            self.meeting_deps = meetings.deps_available()
+        if not self.meeting_deps:
+            self.say("I can take meeting notes once my extras are installed:\n"
+                     "py -m pip install -r requirements-meetings.txt", 20)
+        return self.meeting_deps
+
+    def start_recording(self, app, auto):
+        if self.recorder or not self.have_meeting_deps():
+            return
+        folder = meetings.new_meeting_folder(self.meetings_base(), app)
+        rec = meetings.Recorder(folder)
+        try:
+            rec.start()
+        except Exception as e:
+            rec.stop()
+            self.say(f"I couldn't start recording: {e}", 15)
+            return
+        self.recorder, self.rec_app, self.rec_folder, self.rec_auto = rec, app, folder, auto
+        self.rec_started_at = datetime.now()
+        self.rec_last_seen = time.time()
+        self._write_meeting_meta(0)
+        self.force_sleep = False
+        self.react("happy", 1.5)
+        self.say("Recording! I'll write up notes when the call ends." if auto else
+                 "Recording! Right-click me and choose Stop when you're done.", 6)
+
+    def _write_meeting_meta(self, seconds):
+        meta = {"app": self.rec_app, "started": self.rec_started_at.isoformat(timespec="seconds"),
+                "seconds": round(seconds)}
+        (self.rec_folder / "meeting.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    def stop_recording(self, why=None):
+        rec = self.recorder
+        if not rec:
+            return
+        self.recorder = None
+        self._write_meeting_meta(rec.stop())
+        meetings.start_processing(self.rec_folder)
+        self.meeting_jobs.append(self.rec_folder)
+        self.say((why + "\n" if why else "") + "Writing up your notes now - this can take a few minutes.", 10)
+
+    def meeting_tick(self):
+        now = time.time()
+        for folder in list(self.meeting_jobs):
+            st = meetings.read_status(folder)
+            if st["state"] == "done":
+                self.meeting_jobs.remove(folder)
+                self.react("happy", 3)
+                self.say("Your meeting notes are ready! \U0001F4DD", 300, actions=[
+                    ("Open notes", lambda n=st.get("notes"): open_file(n)),
+                    ("Open folder", lambda f=folder: os.startfile(f))])
+            elif st["state"] == "error":
+                self.meeting_jobs.remove(folder)
+                self.say(f"I couldn't finish those meeting notes ({st.get('error')}).", 60,
+                         actions=[("Open folder", lambda f=folder: os.startfile(f))])
+
+        if self.recorder:
+            apps = meetings.meeting_apps_in_use()
+            if self.rec_app in apps or (apps and not self.rec_auto):
+                self.rec_last_seen = now
+            if self.rec_auto and now - self.rec_last_seen > 20:
+                self.stop_recording("The call ended, so I stopped recording.")
+            elif self.recorder.elapsed() > 4 * 3600:
+                self.stop_recording("That's 4 hours, so I stopped recording.")
+            return
+        if not self.cfg.get("meeting_notes", True):
+            return
+        apps = meetings.meeting_apps_in_use()
+        if not apps:
+            self.meeting_offered.clear()
+            return
+        new = [a for a in apps if a not in self.meeting_offered]
+        if not new or self.dragging:
+            return
+        self.meeting_offered.update(apps)
+        if not self.have_meeting_deps():
+            return
+        app = new[0]
+        self.force_sleep = False
+        self.react("alert", 4)
+        self.say(f"Looks like you're on a {app} call. Want me to record it and write up notes?\n"
+                 "Remember to let everyone know it's being recorded.", 90,
+                 actions=[("Record & take notes", lambda: self.start_recording(app, auto=True)),
+                          ("Not this time", lambda: None)])
 
     def say(self, text, secs=12, on_click=None):
         self.bubble.show(text, secs, on_click)
@@ -962,12 +1148,19 @@ class CrabApp:
             else:
                 self.chat.open(voice=True)
             return
+        if self.recorder:
+            mins = int(self.recorder.elapsed() // 60)
+            what = "meeting" if self.rec_app == "Meeting" else f"{self.rec_app} call"
+            self.say(f"Recording your {what} ({mins} min so far).", 20,
+                     actions=[("Stop & write notes", self.stop_recording), ("Keep going", lambda: None)])
+            return
         self.force_sleep = False
         self.react("happy", 2.0)
         if random.random() < 0.3:
             self.say(random.choice(["Hehe, that tickles!", "*snip snip*", "Hi friend!", "Need anything? Hover me!"]), 4)
 
     def on_menu(self, e):
+        self.build_menu()
         self.ctx.tk_popup(e.x_root, e.y_root)
 
     # ---------------- behaviour
@@ -990,7 +1183,7 @@ class CrabApp:
             return "work"
         if act == "thinking":
             return "think"
-        if self.force_sleep or idle_seconds() > self.cfg.get("sleep_after_sec", 180):
+        if self.force_sleep or (idle_seconds() > self.cfg.get("sleep_after_sec", 180) and not self.recorder):
             return "sleep"
         if now >= self.behaviour_until:
             names = [b for b, _ in BEHAVIOURS if b != "walk" or self.cfg.get("walk", True)]
@@ -1109,7 +1302,9 @@ class CrabApp:
             self.next_blink = now + random.uniform(2, 6)
         blink = now < self.blink_until
         look = self.look if pose == "look" else 0
-        self.draw_sprite(render(pose_params(pose, self.t, self.facing, look, blink)))
+        params = pose_params(pose, self.t, self.facing, look, blink)
+        params["rec"] = self.recorder is not None
+        self.draw_sprite(render(params))
 
         px, py = self.root.winfo_pointerxy()
         rx, ry = self.root.winfo_x(), self.root.winfo_y()
@@ -1137,12 +1332,18 @@ class CrabApp:
         self.root.lift()
         if self.bubble.visible:
             self.bubble.win.lift()
+        try:
+            self.meeting_tick()
+        except Exception as e:
+            if not getattr(self, "meeting_error_shown", False):
+                self.meeting_error_shown = True
+                self.say(f"Meeting notes hit a snag: {e}", 15)
 
         idle = idle_seconds()
         if idle > 300:
             self.active_since = now
             self.stretch_nagged = False
-        if self.pose in ("sleep", "drag") or self.bubble.visible:
+        if self.pose in ("sleep", "drag") or self.bubble.visible or self.recorder:
             return
 
         hwnd, title = foreground_window()
@@ -1218,7 +1419,8 @@ class CrabApp:
 def preview(path):
     root = tk.Tk()
     root.withdraw()
-    poses = ["idle", "walk", "look", "wave", "dance", "bubble", "snap", "sleep", "think", "work", "drag", "happy", "alert"]
+    poses = ["idle", "walk", "look", "wave", "dance", "bubble", "snap", "sleep", "think", "work", "drag", "happy",
+             "alert", "idle+rec", "work+rec"]
     S, cols = 6, 5
     rows = (len(poses) + cols - 1) // cols
     img = tk.PhotoImage(width=cols * 32 * S, height=rows * 32 * S)
@@ -1226,7 +1428,9 @@ def preview(path):
     for n, name in enumerate(poses):
         ox, oy = (n % cols) * 32 * S, (n // cols) * 32 * S
         img.put("#eef1f5" if (n % 2) else "#e4e8ee", to=(ox, oy, ox + 32 * S, oy + 32 * S))
-        for (x, y), c in render(pose_params(name, 5, 1, 1)).items():
+        p = pose_params(name.split("+")[0], 4, 1, 1)
+        p["rec"] = name.endswith("+rec")
+        for (x, y), c in render(p).items():
             img.put(c, to=(ox + x * S, oy + y * S, ox + (x + 1) * S, oy + (y + 1) * S))
     img.write(path, format="png")
     root.destroy()

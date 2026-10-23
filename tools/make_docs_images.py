@@ -15,10 +15,12 @@ DOCS = ROOT / "docs"
 FRAME_MS = 120
 
 
-def sprite(pose, t, scale, look=0):
+def sprite(pose, t, scale, look=0, rec=False):
     img = Image.new("RGBA", (32 * scale, 32 * scale), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    for (x, y), c in render(pose_params(pose, t, 1, look)).items():
+    p = pose_params(pose, t, 1, look)
+    p["rec"] = rec
+    for (x, y), c in render(p).items():
         d.rectangle([x * scale, y * scale, (x + 1) * scale - 1, (y + 1) * scale - 1], fill=c)
     return img
 
@@ -125,6 +127,7 @@ def main():
     DOCS.mkdir(exist_ok=True)
     for pose in ("idle", "walk", "sleep", "think", "work", "drag", "happy", "dance", "bubble", "alert"):
         save_gif([sprite(pose, t, 5) for t in range(24)], DOCS / f"{pose}.gif")
+    save_gif([sprite("idle", t, 5, rec=True) for t in range(24)], DOCS / "recording.gif")
     hero()
     menu_closeup()
     print("wrote", sorted(p.name for p in DOCS.iterdir()))

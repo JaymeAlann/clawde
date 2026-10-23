@@ -17,6 +17,7 @@
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Using Clawde](#using-clawde)
+- [Meeting notes](#meeting-notes)
 - [Configuration](#configuration)
 - [How it works](#how-it-works)
 - [Troubleshooting](#troubleshooting)
@@ -35,6 +36,7 @@
 - 💻 **Pulls out a laptop when Claude is working.** Whenever *any* Claude Code session is running tools, on Windows or in WSL. It celebrates when the work is done.
 - 💡 **Offers help.** When it looks like you're stuck, Clawde pops up with a short tip from Claude.
 - 🎙️ **Voice chat with Claude Code.** Hover the crab, press the microphone button, and talk.
+- 🎧 **Meeting notes (optional).** When you join a Teams, Zoom, Meet, Slack or similar call, Clawde asks whether to record it. If you say yes, it transcribes the call on your PC and has Claude write a summary with decisions and action items.
 
 ## Moods
 
@@ -43,10 +45,10 @@
 | ![idle](docs/idle.gif) | ![walk](docs/walk.gif) | ![sleep](docs/sleep.gif) | ![think](docs/think.gif) | ![work](docs/work.gif) |
 | Breathing, blinking | Wandering your screen | No input for 3 min | Claude got a prompt | Claude is running tools |
 
-| Being dragged | Happy | Dancing | Bubbles | Has a tip |
-| :---: | :---: | :---: | :---: | :---: |
-| ![drag](docs/drag.gif) | ![happy](docs/happy.gif) | ![dance](docs/dance.gif) | ![bubble](docs/bubble.gif) | ![alert](docs/alert.gif) |
-| Click and hold | Clicked, or Claude finished | Random | Random | Thinks you need help |
+| Being dragged | Happy | Dancing | Bubbles | Has a tip | Recording |
+| :---: | :---: | :---: | :---: | :---: | :---: |
+| ![drag](docs/drag.gif) | ![happy](docs/happy.gif) | ![dance](docs/dance.gif) | ![bubble](docs/bubble.gif) | ![alert](docs/alert.gif) | ![recording](docs/recording.gif) |
+| Click and hold | Clicked, or Claude finished | Random | Random | Thinks you need help | Taking meeting notes |
 
 All the poses on one sheet:
 
@@ -60,8 +62,9 @@ All the poses on one sheet:
 | **Python** | 3.9 or newer, with tkinter (the python.org installer includes it) |
 | **Claude Code** | Installed and logged in, either on Windows or inside WSL |
 | **Voice input** (optional) | Windows voice typing (Win+H), which is built into Windows 10/11 |
+| **Meeting notes** (optional) | About 1 GB of disk space for the extra packages and the speech-recognition model |
 
-There are no pip packages to install. Clawde only uses the Python standard library.
+The crab itself only uses the Python standard library. Meeting notes need a few extra packages ([step 6](#6-optional-turn-on-meeting-notes)).
 
 ## Installation
 
@@ -122,6 +125,14 @@ powershell -ExecutionPolicy Bypass -File install_autostart.ps1
 
 This adds a shortcut to your Windows Startup folder.
 
+### 6. (Optional) Turn on meeting notes
+
+```powershell
+py -m pip install -r requirements-meetings.txt
+```
+
+This installs PyAudioWPatch (to record audio), numpy, and faster-whisper (speech recognition that runs on your PC). The first meeting you transcribe also downloads the Whisper speech model (about 460 MB for the default `small` model). Restart Clawde afterwards.
+
 ## Using Clawde
 
 <img src="docs/menu.png" alt="Hover menu" width="160" align="right">
@@ -134,7 +145,7 @@ This adds a shortcut to your Windows Startup folder.
 | **Click and hold** | Drag Clawde anywhere, across monitors |
 | **Click** | Clawde is happy to see you (and wakes up if it was asleep) |
 | **Click a speech bubble** | Opens the chat about that tip |
-| **Right-click** | Menu: type to chat, open the CLI, turn wandering on/off, turn smart tips on/off, take a nap, quit |
+| **Right-click** | Menu: type to chat, open the CLI, record a meeting, open your meeting notes, turn features on/off, take a nap, quit |
 
 **The chat window** keeps the conversation going until you press **New chat**. Each message is sent with `claude -p --resume <session>`, so Claude Code remembers what you said earlier. You can also type and press Enter instead of talking.
 
@@ -145,7 +156,47 @@ This adds a shortcut to your Windows Startup folder.
 - You've been working for about an hour. Clawde reminds you to stretch.
 - Every now and then, it shares a Claude Code tip.
 
-It never shows more than one tip every 5 minutes, and stays quiet while it's asleep or being dragged.
+It never shows more than one tip every 5 minutes, and stays quiet while it's asleep, being dragged, or recording a meeting.
+
+<br clear="right">
+
+## Meeting notes
+
+<img src="docs/recording.gif" alt="Clawde recording" width="160" align="right">
+
+1. **Clawde notices the call.** When a call app (Teams, Zoom, Webex, Slack, Discord, or a browser for Google Meet) starts using your microphone, Clawde perks up:
+
+   > Looks like you're on a Teams call. Want me to record it and write up notes?
+   > Remember to let everyone know it's being recorded.
+   >
+   > **[Record & take notes]** **[Not this time]**
+
+   Nothing is recorded unless you click **Record & take notes**. If you click **Not this time**, Clawde won't ask again for that call.
+2. **While it records,** Clawde wears headphones and shows a blinking red light. It records two tracks: your microphone ("You") and the call audio coming out of your speakers ("Others"). Click Clawde at any time to see how long it has been recording, or to stop.
+3. **When the call ends** (the call app lets go of the microphone for 20 seconds), Clawde stops on its own. It then:
+   - transcribes both tracks **on your PC** with [faster-whisper](https://github.com/SYSTRAN/faster-whisper),
+   - sends the transcript to Claude Code (`claude -p`) to write the notes, and
+   - shows a **"Your meeting notes are ready!"** bubble with buttons to open them.
+
+To record something Clawde didn't detect, right-click Clawde and choose **Record a meeting now**, then **Stop recording and write notes** when you're done.
+
+Each meeting gets its own folder in `Documents\Clawde Meetings` (for example `2026-10-23 1000 Teams`) containing:
+
+| File | What's in it |
+| --- | --- |
+| `notes.md` | Title, summary, decisions, an action-item checklist with owners and due dates, open questions, key details |
+| `transcript.md` | The full transcript with timestamps and You / Others labels |
+| `meeting.json` | When it started, which app, and how long it lasted |
+| `you.wav`, `others.wav` | The audio. Deleted once the notes are written, unless you set `keep_audio` to `true` |
+
+See an [example of the notes](docs/example-notes.md) and [its transcript](docs/example-transcript.md), made from a short test meeting.
+
+**Good to know**
+
+- **Headphones work best.** Without them your microphone also picks up the other people. Clawde removes most of those echoes, but some lines may still be credited to "You".
+- **Speakers aren't identified by name.** Everyone except you is "Others", but Claude uses names mentioned in the conversation when it assigns action items.
+- **Speed.** On a typical laptop, the `small` model transcribes an hour of audio in roughly 5–15 minutes. For faster but less accurate results, set `whisper_model` to `base`. For better accuracy (slower), use `medium`.
+- **Recording consent.** Many places require everyone on a call to agree to being recorded, and many workplaces have their own rules. Make sure you're allowed to record before you click Record.
 
 <br clear="right">
 
@@ -164,6 +215,11 @@ It never shows more than one tip every 5 minutes, and stays quiet while it's asl
 | `walk` | `true` | Let Clawde wander around |
 | `scale` | `0` | Size of one sprite pixel in screen pixels; `0` picks one from your display's DPI |
 | `position` | `null` | Last place you dropped Clawde (saved automatically) |
+| `meeting_notes` | `true` | Offer to record when a call starts (also in the right-click menu) |
+| `meetings_folder` | `Documents\Clawde Meetings` | Where meeting folders are saved |
+| `whisper_model` | `"small"` | Speech model: `tiny`, `base`, `small`, `medium` or `large-v3` (bigger = more accurate, slower) |
+| `meeting_language` | `""` | Language code such as `"en"`, or blank to detect it automatically |
+| `keep_audio` | `false` | Keep the WAV recordings after the notes are written |
 
 ## How it works
 
@@ -172,6 +228,9 @@ It never shows more than one tip every 5 minutes, and stays quiet while it's asl
 - **Idle and help detection** use the Win32 `GetLastInputInfo` and `GetForegroundWindow` functions through `ctypes`.
 - **Voice input** focuses the chat box and presses Win+H to start Windows' own voice typing. Your audio goes through Windows, not through Clawde.
 - **Chat and tips** run `claude -p --output-format json` in the background.
+- **Call detection** reads Windows' microphone privacy tracking (`HKCU\...\CapabilityAccessManager\ConsentStore\microphone`), which records which app is using the mic right now.
+- **Meeting recording** uses WASAPI through PyAudioWPatch: one stream from your default mic, and one "loopback" stream of your default speakers. Both are saved as 16 kHz mono WAV, padded with silence so the two tracks stay in sync.
+- **Meeting processing** runs in a separate background Python process (`meetings.py process <folder>`), so Clawde stays responsive. You can also run that command yourself to process a folder again.
 
 ## Troubleshooting
 
@@ -184,6 +243,10 @@ It never shows more than one tip every 5 minutes, and stays quiet while it's asl
 | Clawde is too big or too small | Set `scale` (try `3` to `6`) |
 | A console window appears | Start Clawde with `pyw`, not `py` |
 | Clawde disappeared off-screen | Delete the `position` entry in `crab_config.json` and restart |
+| Clawde says it needs extras to take meeting notes | Run `py -m pip install -r requirements-meetings.txt`, then restart Clawde |
+| Clawde doesn't offer to record a call | Check **Offer to take meeting notes** in the right-click menu. If your call app isn't detected, use **Record a meeting now** |
+| The "Others" track is silent | Clawde records your *default* speakers. Make the device your call plays through the default in Windows sound settings |
+| Notes failed but the transcript is there | Claude Code wasn't reachable. Run `py meetings.py process "<meeting folder>"` to try again |
 
 ## Uninstalling
 
@@ -199,7 +262,9 @@ It never shows more than one tip every 5 minutes, and stays quiet while it's asl
 ## Development
 
 ```text
-crab_pet.py              the whole app: sprite renderer, behaviour, activity watcher, chat
+crab_pet.py              the app: sprite renderer, behaviour, activity watcher, chat
+meetings.py              call detection, recording, transcription, and the notes prompt
+requirements-meetings.txt  extras for meeting notes
 install_autostart.ps1    adds or removes the login shortcut
 Start Clawde.bat         double-click launcher
 tools/make_docs_images.py  regenerates the images in docs/
@@ -224,6 +289,7 @@ py tools/make_docs_images.py
 - Clawde reads your Claude Code transcript files **locally**, only to tell whether a session is busy. Their contents never leave your machine.
 - With `ai_tips` on, the **title of your active window** is sent to Claude when it looks like you need help. Window titles can contain email subjects, document names or URLs. Turn this off from the right-click menu, or set `"ai_tips": false`.
 - Chat messages go to Claude Code, exactly as if you'd typed them into `claude`.
+- **Meetings are only recorded after you click Record.** The audio never leaves your PC: transcription runs locally, and the recordings are deleted after the notes are written (unless `keep_audio` is on). The **transcript text** is sent to Claude to write the notes. Transcripts and notes stay in your meetings folder.
 
 ## License
 
