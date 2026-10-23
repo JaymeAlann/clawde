@@ -6,6 +6,7 @@ Run:  pyw crab_pet.py          (no console window)
 """
 import ctypes
 import ctypes.wintypes as wt
+import io
 import json
 import math
 import os
@@ -23,8 +24,12 @@ import tkinter as tk
 
 import claude_link
 import meetings
+import physics
+import updater
+import voice
+import wrapped
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 REPO = "JaymeAlann/clawde"
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = claude_link.DATA / "crab_config.json"
@@ -50,6 +55,11 @@ DEFAULTS = {
     "check_updates": True,
     "last_update_check": 0,
     "baby_crabs": True,         # a little crab for each running subagent
+    "physics": True,            # stand on windows and the taskbar, fall when dropped, climb, peek
+    "talk_back": False,         # read Claude's chat replies aloud
+    "wake_word": False,         # listen for "Hey Clawde" (Windows speech recognition, on this PC)
+    "voice": "",                # a Windows voice name, e.g. "Microsoft Zira Desktop"; blank = default
+    "wrapped": True,            # keep stats and offer a weekly "Clawde Wrapped" card
 }
 MAX_BABIES = 5
 NO_WINDOW = 0x08000000
@@ -253,6 +263,8 @@ class ActivityWatcher(threading.Thread):
         self.agents = []        # live subagents: [{"id", "type", "description"}], oldest first
         self.meta = {}          # subagent path -> its .meta.json
         self.first_seen = {}
+        self.sessions = {}      # main session transcripts busy right now -> project name
+        self.projects = {}
 
     def _find_wsl_roots(self):
         for base in (rf"\\wsl.localhost\{self.distro}\home", rf"\\wsl$\{self.distro}\home"):
@@ -356,6 +368,28 @@ class ActivityWatcher(threading.Thread):
         self.cache[key] = (mtime, done)
         return done
 
+    def _project(self, path):
+        """The session's working folder name, from the first transcript record that has one."""
+        if path not in self.projects:
+            name = None
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    for _ in range(30):
+                        line = f.readline()
+                        if not line:
+                            break
+                        try:
+                            cwd = json.loads(line).get("cwd")
+                        except (ValueError, AttributeError):
+                            continue
+                        if cwd:
+                            name = cwd.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+                            break
+            except OSError:
+                pass
+            self.projects[path] = name or "Claude Code"
+        return self.projects[path]
+
     def _agent(self, path):
         if path not in self.meta:
             try:
@@ -381,6 +415,7 @@ class ActivityWatcher(threading.Thread):
                         self.files.setdefault(p, 0)
             working = thinking = False
             agents = []
+            sessions = {}
             for p in list(self.files):
                 try:
                     m = os.stat(p).st_mtime
@@ -396,15 +431,20 @@ class ActivityWatcher(threading.Thread):
                     cached = (m, self._classify(p))
                     self.cache[p] = cached
                 kind = cached[1]
+                busy = (kind == "working" and age < 600) or (kind == "text" and age < 4) or \
+                       (kind == "thinking" and age < 300)
                 if (kind == "working" and age < 600) or (kind == "text" and age < 4):
                     working = True
                 elif kind == "thinking" and age < 300:
                     thinking = True
+                if busy and "subagents" not in p:
+                    sessions[p] = self._project(p)
                 if "subagents" in p and age < 180 and not self._finished(p, m):
                     agents.append(self._agent(p))
             self.status = "working" if working else "thinking" if thinking else "idle"
             agents.sort(key=lambda a: a["since"])
             self.agents = agents
+            self.sessions = sessions
             time.sleep(1.5)
 
 # ---------------------------------------------------------------- sprite
@@ -666,6 +706,18 @@ def palette_for(agent_type):
     return EXTRA_PALETTES[sum(map(ord, agent_type)) % len(EXTRA_PALETTES)]
 
 
+def sprite_image(pose, t, scale, palette=None, balls=None):
+    """The crab as a Pillow image (for the Wrapped card)."""
+    from PIL import Image, ImageDraw
+    img = Image.new("RGBA", (32 * scale, 32 * scale), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    p = pose_params(pose, t)
+    p["palette"], p["balls"] = palette, balls
+    for (x, y), c in render(p).items():
+        d.rectangle([x * scale, y * scale, (x + 1) * scale - 1, (y + 1) * scale - 1], fill=c)
+    return img
+
+
 def paint(cv, px, S, tag="sprite"):
     """Draw a pixel dict on a canvas, merging same-colour runs into one rectangle."""
     cv.delete(tag)
@@ -919,6 +971,7 @@ class ChatWindow:
 
     def close(self):
         self.voice = False
+        self.app.speaker.stop()
         self.win.withdraw()
 
     def reset(self):
@@ -978,6 +1031,8 @@ class ChatWindow:
         else:
             self._write("\nClaude: ", "claude")
             self._write(text + "\n")
+            if self.app.cfg.get("talk_back"):
+                self.app.speaker.say(text, self.app.cfg.get("voice", ""))
 
 # ---------------------------------------------------------------- baby crabs
 
@@ -1168,6 +1223,23 @@ class CrabApp:
         self.badge_drawn = None
         self.hover_baby = None
 
+        # physics: falling, hopping onto windows, peeking from the edge
+        self.falling = bool(self.cfg.get("physics", True))
+        self.vy = 0.0
+        self.jump = None
+        self.peek = None
+
+        # Wrapped stats
+        self.stats = wrapped.Stats(claude_link.DATA / "stats.json")
+        self.stats_at = time.time()
+        self.wrapped_win = None
+
+        # voice
+        self.speaker = voice.Speaker()
+        self.listener = voice.WakeListener(self.cfg["name"], self._on_wake, self._on_listen_status)
+        if self.cfg.get("wake_word"):
+            self.listener.start()
+
         cv = self.cv
         cv.bind("<ButtonPress-1>", self.on_press)
         cv.bind("<B1-Motion>", self.on_motion)
@@ -1181,8 +1253,21 @@ class CrabApp:
         self.approve_var = tk.StringVar(value=self.cfg.get("approvals", "bubble"))
         self.sound_var = tk.BooleanVar(value=self.cfg.get("sounds", True))
         self.baby_var = tk.BooleanVar(value=self.cfg.get("baby_crabs", True))
+        self.physics_var = tk.BooleanVar(value=self.cfg.get("physics", True))
+        self.talk_var = tk.BooleanVar(value=self.cfg.get("talk_back", False))
+        self.wake_var = tk.BooleanVar(value=self.cfg.get("wake_word", False))
+        self.wrapped_var = tk.BooleanVar(value=self.cfg.get("wrapped", True))
 
-        if not self.cfg.get("hooks_offered") and not claude_link.hooks_installed(self.cfg.get("wsl_distro")):
+        self.updating = False
+        updated_from = self.cfg.pop("just_updated_from", None)
+        if updated_from:
+            save_config(self.cfg)
+        if updated_from and updated_from != __version__:
+            self.react("happy", 3)
+            self.say(f"Ta-da! I'm v{__version__} now.", 10,
+                     actions=[("What's new", lambda: os.startfile(f"https://github.com/{REPO}/releases/tag/v{__version__}")),
+                              ("Nice!", lambda: None)])
+        elif not self.cfg.get("hooks_offered") and not claude_link.hooks_installed(self.cfg.get("wsl_distro")):
             self.say(f"Hi, I'm {self.cfg['name']}! Want me to show when Claude Code needs your permission, "
                      "so you can Allow or Deny right from here?", 120, actions=[
                          ("Connect me", lambda: self.connect_hooks(True)),
@@ -1233,12 +1318,28 @@ class CrabApp:
             perms.add_command(label="Connect to Claude Code", command=lambda: self.connect_hooks(True))
         m.add_cascade(label="Permission requests", menu=perms)
         m.add_checkbutton(label="Sounds", variable=self.sound_var, command=self._toggle_sound)
-        m.add_checkbutton(label="Baby crabs for subagents", variable=self.baby_var, command=self._toggle_babies)
+        extras = tk.Menu(m, tearoff=0)
+        extras.add_checkbutton(label="Baby crabs for subagents", variable=self.baby_var, command=self._toggle_babies)
+        extras.add_checkbutton(label="Physics: stand on windows, fall, climb, peek", variable=self.physics_var,
+                               command=lambda: self._toggle("physics", self.physics_var))
+        extras.add_checkbutton(label="Talk back: read Claude's replies aloud", variable=self.talk_var,
+                               command=lambda: self._toggle("talk_back", self.talk_var))
+        extras.add_checkbutton(label=f'Listen for "Hey {self.cfg["name"]}"', variable=self.wake_var,
+                               command=lambda: self._toggle("wake_word", self.wake_var))
+        extras.add_checkbutton(label="Clawde Wrapped stats", variable=self.wrapped_var,
+                               command=lambda: self._toggle("wrapped", self.wrapped_var))
+        m.add_cascade(label="Fun extras", menu=extras)
+        if self.cfg.get("wrapped", True):
+            wr = tk.Menu(m, tearoff=0)
+            wr.add_command(label="Today", command=lambda: self.show_wrapped("day"))
+            wr.add_command(label="This week", command=lambda: self.show_wrapped("week"))
+            m.add_cascade(label="Clawde Wrapped", menu=wr)
         m.add_separator()
         m.add_checkbutton(label="Wander around", variable=self.walk_var, command=self._toggle_walk)
         m.add_checkbutton(label="Smart tips (asks Claude)", variable=self.tips_var, command=self._toggle_tips)
         m.add_command(label="Take a nap", command=self._nap)
         m.add_separator()
+        m.add_command(label="Check for updates", command=self.check_updates_now)
         m.add_command(label=f"About {self.cfg['name']} {__version__}",
                       command=lambda: os.startfile(f"https://github.com/{REPO}"))
         m.add_command(label="Goodbye", command=self.quit)
@@ -1246,6 +1347,98 @@ class CrabApp:
     def _set_approvals(self):
         self.cfg["approvals"] = self.approve_var.get()
         save_config(self.cfg)
+
+    # ---------------- Clawde Wrapped
+    def maybe_offer_wrapped(self):
+        """Friday afternoons: offer this week's card, once per week."""
+        now = datetime.now()
+        week = now.strftime("%G-W%V")
+        if now.weekday() != 4 or now.hour < 15 or self.cfg.get("wrapped_offered") == week:
+            return
+        if self.perm_current or self.recorder or self.bubble.visible or self.pose == "sleep":
+            return
+        if not self.stats.summary("week")["sessions"]:
+            return
+        self.cfg["wrapped_offered"] = week
+        save_config(self.cfg)
+        self.react("dance", 3)
+        self.say("Your week with Claude is wrapped! Want to see it?", 120,
+                 actions=[("Show me", lambda: self.show_wrapped("week")), ("Later", lambda: None)])
+
+    def show_wrapped(self, span):
+        try:
+            card = wrapped.render_card(self.stats.summary(span), sprite_image,
+                                       [palette_for(k) for k in ("Explore", "Plan", "general-purpose")],
+                                       self.cfg["name"], f"github.com/{REPO}")
+        except ImportError:
+            self.say("Wrapped needs Pillow: py -m pip install Pillow", 15)
+            return
+        import base64
+        from tkinter import filedialog
+        from PIL import Image
+        if self.wrapped_win is not None:
+            self.wrapped_win.destroy()
+        w = self.wrapped_win = tk.Toplevel(self.root)
+        w.title(f"{self.cfg['name']} Wrapped")
+        w.configure(bg="#1c1917")
+        w.attributes("-topmost", True)
+        buf = io.BytesIO()
+        card.resize((900, 506), Image.LANCZOS).save(buf, "PNG")
+        photo = tk.PhotoImage(data=base64.b64encode(buf.getvalue()))
+        label = tk.Label(w, image=photo, bg="#1c1917", bd=0)
+        label.image = photo
+        label.pack(padx=12, pady=(12, 8))
+        status = tk.Label(w, text="", bg="#1c1917", fg="#8a817b", font=("Segoe UI", 9))
+
+        def copy():
+            try:
+                wrapped.copy_to_clipboard(card)
+                status.config(text="Copied! Paste it into X, LinkedIn or Slack.", fg="#59e08a")
+            except OSError as e:
+                status.config(text=str(e), fg="#ff7a7a")
+
+        def save():
+            pictures = Path.home() / "Pictures"
+            path = filedialog.asksaveasfilename(parent=w, defaultextension=".png", filetypes=[("PNG image", "*.png")],
+                                                initialdir=str(pictures if pictures.is_dir() else Path.home()),
+                                                initialfile=f"clawde-wrapped-{datetime.now():%Y-%m-%d}.png")
+            if path:
+                card.convert("RGB").save(path)
+                status.config(text=f"Saved to {path}", fg="#59e08a")
+
+        bar = tk.Frame(w, bg="#1c1917")
+        bar.pack(pady=(0, 6))
+        for text, cmd, primary in (("Copy image", copy, True), ("Save image...", save, False), ("Close", w.destroy, False)):
+            tk.Button(bar, text=text, command=cmd, bd=0, padx=14, pady=6, font=("Segoe UI Semibold", 10),
+                      bg=C if primary else "#2b2522", fg="white", activebackground="#ff7a4a",
+                      activeforeground="white").pack(side="left", padx=5)
+        status.pack(pady=(0, 10))
+        w.focus_force()
+
+    # ---------------- voice
+    def _on_wake(self, phrase):
+        self.events.put(("wake", phrase))
+
+    def _on_listen_status(self, msg):
+        if msg:
+            self.events.put(("say", msg))
+
+    def _toggle(self, key, var):
+        self.cfg[key] = var.get()
+        save_config(self.cfg)
+        if key == "wake_word":
+            if var.get():
+                self.listener.start()
+                self.say(f'Listening for "Hey {self.cfg["name"]}". Windows does the listening, right here on your PC.', 8)
+            else:
+                self.listener.stop()
+        elif key == "talk_back":
+            if var.get():
+                self.speaker.say("Hi! I'll read Claude's replies out loud.", self.cfg.get("voice", ""))
+            else:
+                self.speaker.stop()
+        elif key == "physics" and var.get():
+            self.falling, self.vy = True, 0.0
 
     def _toggle_babies(self):
         self.cfg["baby_crabs"] = self.baby_var.get()
@@ -1339,6 +1532,8 @@ class CrabApp:
     def answer(self, rid, decision):
         delivered = self.bridge.respond(rid, decision or {"behavior": "defer"})
         self.perm_current = None
+        if delivered and decision and self.cfg.get("wrapped", True):
+            self.stats.count("allowed" if decision["behavior"] == "allow" else "denied")
         if not delivered:
             self.say("Too late, sorry! Claude Code already asked you in its own window.", 6)
         elif decision and decision["behavior"] == "allow":
@@ -1347,6 +1542,9 @@ class CrabApp:
     def quit(self):
         if self.recorder:
             self.stop_recording()
+        self.listener.stop()
+        self.speaker.stop()
+        self.stats.save()
         self.cfg["position"] = [self.root.winfo_x(), self.root.winfo_y()]
         save_config(self.cfg)
         self.root.destroy()
@@ -1409,6 +1607,8 @@ class CrabApp:
             st = meetings.read_status(folder)
             if st["state"] == "done":
                 self.meeting_jobs.remove(folder)
+                if self.cfg.get("wrapped", True):
+                    self.stats.count("meetings")
                 self.react("happy", 3)
                 self.say("Your meeting notes are ready! \U0001F4DD", 300, actions=[
                     ("Open notes", lambda n=st.get("notes"): open_file(n)),
@@ -1490,6 +1690,8 @@ class CrabApp:
             self.react("happy", 1.0)
             self.cfg["position"] = [self.root.winfo_x(), self.root.winfo_y()]
             save_config(self.cfg)
+            if self.cfg.get("physics", True):
+                self.falling, self.vy = True, 0.0     # wheee
             return
         if was_menu:
             if e.x < self.W // 2:
@@ -1538,15 +1740,116 @@ class CrabApp:
             return "think"
         if self.force_sleep or (idle_seconds() > self.cfg.get("sleep_after_sec", 180) and not self.recorder):
             return "sleep"
+        if self.jump:
+            return "happy"
+        if self.peek:
+            return "look" if self.peek["phase"] == "hide" else "walk"
         if now >= self.behaviour_until:
-            names = [b for b, _ in BEHAVIOURS if b != "walk" or self.cfg.get("walk", True)]
-            weights = [w for b, w in BEHAVIOURS if b in names]
-            self.behaviour = random.choices(names, weights)[0]
+            options = list(BEHAVIOURS)
+            if self.cfg.get("physics", True) and self.cfg.get("walk", True):
+                options += [("climb", 6), ("peek", 4)]
+            options = [(b, w) for b, w in options if b != "walk" or self.cfg.get("walk", True)]
+            self.behaviour = random.choices([b for b, _ in options], [w for _, w in options])[0]
             span = {"idle": (3, 7), "walk": (2, 6), "look": (2, 4)}.get(self.behaviour, (1.5, 3))
             self.behaviour_until = now + random.uniform(*span)
             if self.behaviour == "walk":
                 self.facing = random.choice((-1, 1))
+            elif self.behaviour == "climb":
+                self.start_climb()
+                return "happy" if self.jump else "idle"
+            elif self.behaviour == "peek":
+                self.start_peek()
+                return "walk" if self.peek else "idle"
+        if self.behaviour in ("climb", "peek"):
+            return "idle"
         return self.behaviour
+
+    # ---------------- physics
+    FEET = 30           # sprite rows down to the bottom of the legs
+
+    def _ground(self):
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        area = work_area(x + self.W // 2, y + self.pet_h // 2)
+        return x, y, x + self.W // 2, y + self.FEET * self.S, area
+
+    def physics_step(self):
+        if not self.cfg.get("physics", True) or self.dragging:
+            self.jump = self.peek = None
+            return
+        x, y, cx, feet, area = self._ground()
+        S = self.S
+        if self.jump:
+            j = self.jump
+            u = min(1.0, (self.t - j["t0"]) / j["dur"])
+            arc = j["height"] * 4 * u * (1 - u)
+            nx = j["sx"] + (j["tx"] - j["sx"]) * u
+            ny = j["sy"] + (j["ty"] - j["sy"]) * u - arc
+            self.root.geometry(f"+{int(nx)}+{int(ny)}")
+            if u >= 1:
+                self.jump = None
+                self.react("happy", 0.6)
+            return
+        if self.peek:
+            self.peek_step(x, y, area)
+            return
+        if self.falling:
+            floor = physics.floor_below(cx, feet, area)
+            self.vy = min(self.vy + 1.1 * S, 14 * S)
+            ny = y + self.vy
+            if ny + self.FEET * S >= floor:
+                ny = floor - self.FEET * S
+                if self.vy > 5 * S:
+                    self.vy = -self.vy * 0.35        # bounce
+                    self.react("happy", 0.8)
+                else:
+                    self.vy, self.falling = 0.0, False
+            self.root.geometry(f"+{x}+{int(ny)}")
+            return
+        if self.t % 3 == 0:                         # still standing on something?
+            if physics.floor_below(cx, feet - 4, area) > feet + 3:
+                self.falling, self.vy = True, 0.0
+
+    def start_climb(self):
+        x, y, cx, feet, area = self._ground()
+        spots = physics.ledges_above(cx, feet, area, reach=area[3] - area[1])
+        if not spots:
+            return
+        a, z, top = random.choice(spots)
+        land = min(max(cx, a + 30), z - 30)
+        tx = max(area[0], min(land - self.W // 2, area[2] - self.W))
+        self.facing = 1 if tx > x else -1
+        rise = abs(feet - top)
+        self.jump = {"sx": x, "sy": y, "tx": tx, "ty": top - self.FEET * self.S, "t0": self.t,
+                     "dur": 10 + int(rise / 120), "height": rise * 0.25 + 40}
+
+    def start_peek(self):
+        x, y, cx, feet, area = self._ground()
+        if abs(feet - area[3]) > 4:
+            return                                  # only from the taskbar
+        left = cx - area[0] < area[2] - cx
+        target = area[0] - int(self.W * 0.45) if left else area[2] - int(self.W * 0.55)
+        self.facing = -1 if left else 1
+        self.peek = {"target": target, "home": area[0] if left else area[2] - self.W, "phase": "go",
+                     "until": 0, "inward": 1 if left else -1}
+
+    def peek_step(self, x, y, area):
+        p = self.peek
+        step = max(3, self.S)
+        if p["phase"] == "hide":
+            self.look = p["inward"]
+            if time.time() > p["until"]:
+                p["phase"] = "back"
+                self.facing = p["inward"]
+            return
+        goal = p["target"] if p["phase"] == "go" else p["home"]
+        if abs(goal - x) <= step:
+            self.root.geometry(f"+{goal}+{y}")
+            if p["phase"] == "go":
+                p["phase"], p["until"] = "hide", time.time() + random.uniform(3, 7)
+            else:
+                self.peek = None
+            return
+        self.root.geometry(f"+{x + (step if goal > x else -step)}+{y}")
 
     def walk_step(self):
         x, y = self.root.winfo_x(), self.root.winfo_y()
@@ -1698,9 +2001,12 @@ class CrabApp:
                 pose = "happy"
         self.pose = pose
 
-        if pose == "walk":
+        self.physics_step()
+        if pose == "walk" and not self.peek and not self.falling:
             self.walk_step()
-        if pose == "look" and now >= self.next_look:
+        if self.peek and self.peek["phase"] == "hide":
+            pass                                    # peek_step keeps him looking inward
+        elif pose == "look" and now >= self.next_look:
             self.look = random.choice((-1, 0, 1))
             self.next_look = now + random.uniform(0.6, 1.5)
         if now >= self.next_blink:
@@ -1748,6 +2054,10 @@ class CrabApp:
             self.bubble.win.lift()
         for b in self.babies:
             b.win.attributes("-topmost", True)
+        if self.cfg.get("wrapped", True):
+            self.stats.tick(self.watcher.sessions, self.watcher.agents, min(now - self.stats_at, 10))
+            self.maybe_offer_wrapped()
+        self.stats_at = now
         if self.cfg.get("check_updates", True) and now - self.cfg.get("last_update_check", 0) > 86400:
             self.cfg["last_update_check"] = now
             save_config(self.cfg)
@@ -1816,27 +2126,84 @@ class CrabApp:
         text, _, err = self.claude.ask(prompt, model="haiku", timeout=90)
         self.events.put(("tip", text if text and not err else None, ctx))
 
-    def _check_update(self):
-        import urllib.request
+    # ---------------- updates
+    def _check_update(self, manual=False):
         try:
-            req = urllib.request.Request(f"https://api.github.com/repos/{REPO}/releases/latest",
-                                         headers={"User-Agent": "clawde"})
-            with urllib.request.urlopen(req, timeout=15) as r:
-                rel = json.loads(r.read().decode("utf-8"))
+            rel = updater.latest_release(REPO)
         except Exception:
+            if manual:
+                self.events.put(("say", "I couldn't reach GitHub to check for updates."))
             return
+        if rel["tag"] and updater.version_tuple(rel["tag"]) > updater.version_tuple(__version__):
+            self.events.put(("update", rel))
+        elif manual:
+            self.events.put(("say", f"I'm up to date (v{__version__})!"))
 
-        def ver(s):
-            return tuple(int(x) for x in re.findall(r"\d+", s)[:3])
-        tag = rel.get("tag_name") or ""
-        if tag and ver(tag) > ver(__version__):
-            self.events.put(("update", tag, rel.get("html_url") or f"https://github.com/{REPO}/releases"))
+    def check_updates_now(self):
+        threading.Thread(target=self._check_update, args=(True,), daemon=True).start()
+
+    def offer_update(self, rel):
+        frozen = getattr(sys, "frozen", False)
+        if frozen and rel["asset"]:
+            self.say(f"A new version of me is out ({rel['tag']})!", 120, actions=[
+                ("Update now", lambda: self.start_update(rel)),
+                ("What's new", lambda: os.startfile(rel["page"])),
+                ("Later", lambda: None)])
+        else:
+            hint = "Run git pull to update me." if not frozen else ""
+            self.say(f"A new version of me is out ({rel['tag']})! {hint}".strip(), 60, actions=[
+                ("What's new", lambda: os.startfile(rel["page"])), ("Later", lambda: None)])
+
+    def start_update(self, rel):
+        if self.recorder:
+            self.say("I'll update after your meeting. Ask me again from my menu when it's over.", 8)
+            return
+        self.say(f"Downloading {rel['tag']}...", 300)
+        self.updating = True
+
+        def work():
+            last = [-1]
+
+            def progress(f):
+                step = int(f * 10)
+                if step != last[0]:
+                    last[0] = step
+                    self.events.put(("say", f"Downloading {rel['tag']}... {step * 10}%"))
+            try:
+                path = updater.download(rel["asset"], progress)
+                self.events.put(("update_ready", path, rel["tag"]))
+            except Exception as e:
+                self.events.put(("update_failed", str(e), rel["page"]))
+        threading.Thread(target=work, daemon=True).start()
+
+    def install_update(self, path, tag):
+        self.cfg["just_updated_from"] = __version__
+        save_config(self.cfg)
+        self.say(f"Installing {tag}. See you in a sec!", 10)
+        self.root.update()
+        updater.run_installer(path)
+        self.root.after(800, self.quit)
 
     def handle_event(self, ev):
         kind = ev[0]
         if kind == "update":
-            self.say(f"A new version of me is out ({ev[1]})!", 60,
-                     actions=[("Download", lambda: os.startfile(ev[2])), ("Later", lambda: None)])
+            self.offer_update(ev[1])
+            return
+        if kind == "wake":
+            if self.recorder or self.chat.busy:
+                return                      # don't let a meeting say "hey Claude" for you
+            self.force_sleep = False
+            self.react("alert", 1.5)
+            self.chat.open(voice=True)
+            return
+        if kind == "update_ready":
+            self.updating = False
+            self.install_update(ev[1], ev[2])
+            return
+        if kind == "update_failed":
+            self.updating = False
+            self.say(f"The update didn't work: {ev[1]}.", 30,
+                     actions=[("Get it manually", lambda: os.startfile(ev[2])), ("OK", lambda: None)])
             return
         if kind == "chat":
             self.chat.on_reply(*ev[1:])
@@ -1895,6 +2262,11 @@ def main():
         return
     if "--uninstall-hooks" in sys.argv:
         claude_link.uninstall_hooks(load_config().get("wsl_distro"))
+        return
+    if "--update-now" in sys.argv:          # headless update, for scripts and tests
+        rel = updater.latest_release(REPO)
+        if rel["asset"] and updater.version_tuple(rel["tag"]) > updater.version_tuple(__version__):
+            updater.run_installer(updater.download(rel["asset"]), relaunch="--no-relaunch" not in sys.argv)
         return
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)

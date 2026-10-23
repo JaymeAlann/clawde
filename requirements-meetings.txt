@@ -1,4 +1,5 @@
-# Optional: only needed for meeting notes
+# Optional extras: meeting notes and Clawde Wrapped cards
 PyAudioWPatch>=0.2.12
 numpy>=1.24
 faster-whisper>=1.0
+Pillow>=10       # Clawde Wrapped cards

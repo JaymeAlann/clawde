@@ -49,6 +49,14 @@ Name: "{userstartup}\Clawde"; Filename: "{app}\Clawde.exe"; Tasks: startup
 [Run]
 Filename: "{app}\Clawde.exe"; Parameters: "--install-hooks"; Tasks: hooks; Flags: runhidden waituntilterminated
 Filename: "{app}\Clawde.exe"; Description: "Start Clawde now"; Flags: postinstall nowait skipifsilent
+; one-click updates run this installer silently with /RELAUNCH=1
+Filename: "{app}\Clawde.exe"; Flags: nowait; Check: ShouldRelaunch
+
+[Code]
+function ShouldRelaunch: Boolean;
+begin
+  Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
+end;
 
 [UninstallRun]
 Filename: "{sys}\taskkill.exe"; Parameters: "/im Clawde.exe /f"; Flags: runhidden; RunOnceId: "StopClawde"

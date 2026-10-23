@@ -21,6 +21,7 @@
 - [Using Clawde](#using-clawde)
 - [Permission requests](#permission-requests)
 - [Baby crabs](#baby-crabs)
+- [Fun extras](#fun-extras): physics, talking back, "Hey Clawde", Clawde Wrapped
 - [Meeting notes](#meeting-notes)
 - [Configuration](#configuration)
 - [How it works](#how-it-works)
@@ -40,6 +41,10 @@
 - 💻 **Pulls out a laptop when Claude is working.** Whenever *any* Claude Code session is running tools, on Windows or in WSL. It celebrates when the work is done.
 - 🐣 **Baby crabs for subagents.** Each helper agent Claude sends off hatches as a little crab, coloured by its job, typing on a tiny laptop beside Clawde. Three or more and Clawde starts juggling.
 - ✋ **Allow or Deny from the crab.** When any Claude Code session needs your permission, Clawde jumps up with the request and **Allow / Always allow / Deny** buttons, so you don't have to find the right terminal.
+- 🪿 **Physics.** Clawde stands on window title bars and the taskbar, falls with a bounce when you drop him, hops up onto windows, and peeks in from the edge of the screen.
+- 🗣️ **Talks back** (optional). He reads Claude's chat replies aloud, and listens for **"Hey Clawde"** to start a voice chat hands-free.
+- 📊 **Clawde Wrapped.** A shareable card of your day or week with Claude: sessions, hours, baby crabs, approvals, meetings, top project. Copy it straight into X, LinkedIn or Slack.
+- ⬆️ **One-click updates.** When a new version is out, click **Update now** and Clawde updates himself.
 - 💡 **Offers help.** When it looks like you're stuck, Clawde pops up with a short tip from Claude.
 - 🎙️ **Voice chat with Claude Code.** Hover the crab, press the microphone button, and talk.
 - 🎧 **Meeting notes (optional).** When you join a Teams, Zoom, Meet, Slack or similar call, Clawde asks whether to record it. If you say yes, it transcribes the call on your PC and has Claude write a summary with decisions and action items.
@@ -90,7 +95,7 @@ The installer includes everything, meeting notes too. If you run from source, th
 
 > **"Windows protected your PC"?** The installer isn't code-signed yet, so SmartScreen may warn about it. Click **More info → Run anyway**. You can check what it does in [`packaging/`](packaging/), and the installers are built in public by [GitHub Actions](.github/workflows/release.yml).
 
-Clawde checks GitHub once a day and tells you when a new version is out.
+**Updates are one click.** Clawde checks GitHub once a day. When a new version is out he asks, and **Update now** downloads it, checks it against the SHA-256 checksum GitHub publishes for it, installs it quietly with your original options, and restarts. You can also use **right-click → Check for updates**. If you installed v0.3.0 or earlier, update by hand once to get this.
 
 ### From source
 
@@ -240,6 +245,38 @@ Hover over or click a baby to see what it's working on, for example *"Baby Explo
 
 Babies only appear for subagents. Separate Claude Code sessions are represented by Clawde himself. Clawde finds subagents from the logs Claude Code already writes (`~/.claude/projects/<project>/<session>/subagents/`), so this needs no setup.
 
+## Fun extras
+
+Each of these has its own switch under **right-click → Fun extras**.
+
+| Extra | Starts | What it does |
+| --- | --- | --- |
+| **Baby crabs for subagents** | On | [See above](#baby-crabs) |
+| **Physics** | On | Clawde stands on the tops of your windows and the taskbar. Drop him and he falls with a bounce; walk him off a window and he drops to the next one. Now and then he hops up onto a window above him, or scuttles to the edge of the screen and peeks in. If a window moves out from under him, down he goes. Off: he stays wherever you put him. |
+| **Talk back** | Off | Reads Claude's replies in the chat window aloud, skipping code blocks and markdown. Long answers are cut short with "the rest is in the chat window". |
+| **Listen for "Hey Clawde"** | Off | Say *"Hey Clawde"* (or *"Hey Claude"*) and the voice chat opens, ready to listen. It's ignored while Clawde is recording a meeting. |
+| **Clawde Wrapped stats** | On | Keeps the local stats behind the Wrapped card, and offers this week's card on Friday afternoons. |
+
+**Voices and listening** use Windows' built-in speech engines, so there's nothing extra to install and nothing leaves your PC. To pick a different voice, set `voice` in the settings (for example `"Microsoft Zira Desktop"`).
+
+### Clawde Wrapped
+
+![An example Clawde Wrapped card](docs/wrapped-example.png)
+
+*(An example with made-up numbers.)*
+
+**Right-click → Clawde Wrapped → Today / This week** shows your card. **Copy image** puts it on the clipboard, ready to paste into a post. **Save image** saves a PNG.
+
+The card shows:
+- Claude Code sessions, and how long Claude spent working
+- Baby crabs hatched (subagents)
+- Permissions you approved through Clawde
+- Meetings he summarised
+- Your top project
+- Your streak of days in a row with Claude
+
+On Friday afternoons Clawde offers the week's card once. The stats are kept for 60 days in `~/.clawde/stats.json`, and only the card you choose to share ever leaves your PC.
+
 ## Meeting notes
 
 <img src="docs/recording.gif" alt="Clawde recording" width="160" align="right">
@@ -305,6 +342,11 @@ Settings are saved in `%USERPROFILE%\.clawde\crab_config.json`. Most can be chan
 | `sounds` | `true` | Chime when Claude needs you |
 | `check_updates` | `true` | Check GitHub once a day for a new version |
 | `baby_crabs` | `true` | Show a baby crab for each running subagent |
+| `physics` | `true` | Stand on windows and the taskbar, fall, climb, peek |
+| `talk_back` | `false` | Read Claude's chat replies aloud |
+| `wake_word` | `false` | Listen for "Hey Clawde" |
+| `voice` | `""` | Windows voice to use, e.g. `"Microsoft Zira Desktop"`; blank = the default voice |
+| `wrapped` | `true` | Keep Wrapped stats and offer the weekly card |
 
 ## How it works
 
@@ -358,6 +400,10 @@ crab_pet.py              the app: sprite renderer, behaviour, activity watcher, 
 claude_link.py           adds/removes the Claude Code hook, answers permission requests
 clawde_hook.py           the hook Claude Code runs (standard library only)
 meetings.py              call detection, recording, transcription, and the notes prompt
+physics.py               finds window tops and the taskbar for Clawde to stand on
+voice.py                 talking (text-to-speech) and "Hey Clawde" (Windows speech recognition)
+wrapped.py               Wrapped stats and the shareable card
+updater.py               one-click updates from GitHub releases
 requirements-meetings.txt  extras for meeting notes
 packaging/               icon, PyInstaller + Inno Setup build (build.ps1, clawde.iss)
 .github/workflows/       builds the installer for each release
@@ -387,7 +433,7 @@ The installer lands in `build\installer\`.
 
 1. Bump `__version__` in `crab_pet.py`.
 2. Commit, then tag and push: `git tag v0.2.0` then `git push origin v0.2.0`.
-3. GitHub Actions builds `Clawde-Setup-<version>.exe` and attaches it to a new release. Installed copies of Clawde will offer the update within a day.
+3. GitHub Actions builds `Clawde-Setup-<version>.exe` and attaches it to a new release. Within a day, installed copies of Clawde offer **Update now** and update themselves in one click.
 
 ### README images
 
@@ -405,6 +451,8 @@ py tools/make_docs_images.py
 - Chat messages go to Claude Code, exactly as if you'd typed them into `claude`.
 - **Permission requests** pass between Claude Code and Clawde only through files in `~/.clawde/bridge` on your PC, and are deleted once answered. Clawde opens no network ports.
 - The once-a-day update check asks GitHub for the latest release number and sends nothing about you. Set `check_updates` to `false` to turn it off.
+- **"Hey Clawde"** (off by default) uses Windows' own speech recognition on your PC, listening only for the wake phrase. Nothing is recorded or sent anywhere. **Talk back** uses Windows' built-in voices.
+- **Wrapped stats** are counts kept in `~/.clawde/stats.json`. A card only leaves your PC if you copy or save it and share it yourself.
 - **Meetings are only recorded after you click Record.** The audio never leaves your PC: transcription runs locally, and the recordings are deleted after the notes are written (unless `keep_audio` is on). The **transcript text** is sent to Claude to write the notes. Transcripts and notes stay in your meetings folder.
 
 ## License
