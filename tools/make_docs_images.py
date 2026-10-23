@@ -114,6 +114,36 @@ def hero():
     frames[0].save(DOCS / "hero.gif", save_all=True, append_images=frames[1:], duration=FRAME_MS, loop=0)
 
 
+def permission_card():
+    """The Allow/Deny bubble over Clawde's 'needs you' pose."""
+    S, Wd, Ht = 7, 620, 430
+    frames = []
+    for t in range(12):
+        img = Image.new("RGBA", (Wd, Ht), "#1d2130")
+        d = ImageDraw.Draw(img)
+        f, fb = font(19), font(16, bold=True)
+        lines = ["my-api: Claude wants to run a command", "", "npm install left-pad"]
+        x0, y0, w = 40, 24, Wd - 80
+        h = 186
+        d.rectangle([x0, y0, x0 + w, y0 + h], fill="#fffaf3", outline="#4a1608", width=3)
+        for i, line in enumerate(lines):
+            d.text((x0 + 22, y0 + 18 + i * 28), line, font=font(19) if i < 2 else font(18), fill="#2a1a14")
+        bx = x0 + 22
+        for i, label in enumerate(("Allow", "Always allow", "Deny", "In terminal")):
+            l, tp, r, b = d.textbbox((0, 0), label, font=fb)
+            bw = r - l + 28
+            d.rectangle([bx, y0 + 122, bx + bw, y0 + 160], fill="#e8572a" if i == 0 else "#f1e4d8",
+                        outline="#4a1608", width=2)
+            d.text((bx + 14 - l, y0 + 131 - tp), label, font=fb, fill="white" if i == 0 else "#2a1a14")
+            bx += bw + 12
+        cx = Wd // 2
+        d.polygon([(cx - 14, y0 + h - 1), (cx + 14, y0 + h - 1), (cx, y0 + h + 16)], fill="#fffaf3")
+        d.line([(cx - 14, y0 + h), (cx, y0 + h + 16), (cx + 14, y0 + h)], fill="#4a1608", width=3)
+        img.alpha_composite(sprite("needs", t, S), (cx - 16 * S, Ht - 32 * S + 10))
+        frames.append(img)
+    frames[0].save(DOCS / "permission.gif", save_all=True, append_images=frames[1:], duration=FRAME_MS, loop=0)
+
+
 def menu_closeup():
     S = 8
     img = Image.new("RGBA", (32 * S, 44 * S), (0, 0, 0, 0))
@@ -125,10 +155,11 @@ def menu_closeup():
 
 def main():
     DOCS.mkdir(exist_ok=True)
-    for pose in ("idle", "walk", "sleep", "think", "work", "drag", "happy", "dance", "bubble", "alert"):
+    for pose in ("idle", "walk", "sleep", "think", "work", "drag", "happy", "dance", "bubble", "alert", "needs"):
         save_gif([sprite(pose, t, 5) for t in range(24)], DOCS / f"{pose}.gif")
     save_gif([sprite("idle", t, 5, rec=True) for t in range(24)], DOCS / "recording.gif")
     hero()
+    permission_card()
     menu_closeup()
     print("wrote", sorted(p.name for p in DOCS.iterdir()))
 

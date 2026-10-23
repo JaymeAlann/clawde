@@ -6,6 +6,8 @@
 
 ![Clawde working, celebrating, and showing its hover menu](docs/hero.gif)
 
+### [⬇️ Download the Windows installer](https://github.com/JaymeAlann/clawde/releases/latest)
+
 </div>
 
 ---
@@ -17,6 +19,7 @@
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Using Clawde](#using-clawde)
+- [Permission requests](#permission-requests)
 - [Meeting notes](#meeting-notes)
 - [Configuration](#configuration)
 - [How it works](#how-it-works)
@@ -34,16 +37,17 @@
 - 😴 **Naps.** After a few minutes with no keyboard or mouse input it falls asleep, and it wakes up happy when you come back.
 - 🤩 **Gets excited when Claude is thinking.** Whenever *any* Claude Code session has just been given a prompt.
 - 💻 **Pulls out a laptop when Claude is working.** Whenever *any* Claude Code session is running tools, on Windows or in WSL. It celebrates when the work is done.
+- ✋ **Allow or Deny from the crab.** When any Claude Code session needs your permission, Clawde jumps up with the request and **Allow / Always allow / Deny** buttons, so you don't have to find the right terminal.
 - 💡 **Offers help.** When it looks like you're stuck, Clawde pops up with a short tip from Claude.
 - 🎙️ **Voice chat with Claude Code.** Hover the crab, press the microphone button, and talk.
 - 🎧 **Meeting notes (optional).** When you join a Teams, Zoom, Meet, Slack or similar call, Clawde asks whether to record it. If you say yes, it transcribes the call on your PC and has Claude write a summary with decisions and action items.
 
 ## Moods
 
-| Idle | Walking | Sleeping | Thinking | Working |
-| :---: | :---: | :---: | :---: | :---: |
-| ![idle](docs/idle.gif) | ![walk](docs/walk.gif) | ![sleep](docs/sleep.gif) | ![think](docs/think.gif) | ![work](docs/work.gif) |
-| Breathing, blinking | Wandering your screen | No input for 3 min | Claude got a prompt | Claude is running tools |
+| Idle | Walking | Sleeping | Thinking | Working | Needs you |
+| :---: | :---: | :---: | :---: | :---: | :---: |
+| ![idle](docs/idle.gif) | ![walk](docs/walk.gif) | ![sleep](docs/sleep.gif) | ![think](docs/think.gif) | ![work](docs/work.gif) | ![needs](docs/needs.gif) |
+| Breathing, blinking | Wandering your screen | No input for 3 min | Claude got a prompt | Claude is running tools | Claude is waiting on you |
 
 | Being dragged | Happy | Dancing | Bubbles | Has a tip | Recording |
 | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -58,15 +62,33 @@ All the poses on one sheet:
 
 | | |
 | --- | --- |
-| **OS** | Windows 10 or 11 |
-| **Python** | 3.9 or newer, with tkinter (the python.org installer includes it) |
+| **OS** | Windows 10 or 11 (64-bit) |
 | **Claude Code** | Installed and logged in, either on Windows or inside WSL |
+| **Python** | Only if you run from source: 3.9 or newer, with tkinter (the python.org installer includes it) |
 | **Voice input** (optional) | Windows voice typing (Win+H), which is built into Windows 10/11 |
 | **Meeting notes** (optional) | About 1 GB of disk space for the extra packages and the speech-recognition model |
 
-The crab itself only uses the Python standard library. Meeting notes need a few extra packages ([step 6](#6-optional-turn-on-meeting-notes)).
+The installer includes everything, meeting notes too. If you run from source, the crab itself only uses the Python standard library, and meeting notes need a few extra packages ([step 6](#6-optional-turn-on-meeting-notes)).
 
 ## Installation
+
+### The easy way: installer
+
+1. **[Install Claude Code](#2-install-claude-code-and-log-in)** and log in, if you haven't already.
+2. Download **`Clawde-Setup-x.y.z.exe`** from the [latest release](https://github.com/JaymeAlann/clawde/releases/latest) and run it. No admin rights needed; it installs just for you.
+3. Pick your options:
+   - **Start Clawde when I sign in to Windows**
+   - **Show Claude Code permission requests on Clawde**. This adds Clawde's hook to Claude Code's settings ([details](#permission-requests)).
+   - **Create a desktop shortcut**
+4. Clawde appears near the bottom-right of your screen. Done!
+
+> **"Windows protected your PC"?** The installer isn't code-signed yet, so SmartScreen may warn about it. Click **More info → Run anyway**. You can check what it does in [`packaging/`](packaging/), and the installers are built in public by [GitHub Actions](.github/workflows/release.yml).
+
+Clawde checks GitHub once a day and tells you when a new version is out.
+
+### From source
+
+If you'd rather run the Python code directly:
 
 ### 1. Install Python
 
@@ -160,6 +182,31 @@ It never shows more than one tip every 5 minutes, and stays quiet while it's asl
 
 <br clear="right">
 
+## Permission requests
+
+![Clawde asking for permission](docs/permission.gif)
+
+When any Claude Code session (in a terminal, in WSL, or in the Claude desktop app) wants to do something that needs your OK, Clawde jumps up, chimes, and shows the request:
+
+| Button | What it does |
+| --- | --- |
+| **Allow** | Lets Claude do it this once |
+| **Always allow** | Allows it and adds the rule Claude Code suggests (for example "allow `npm install` in this project"), so you won't be asked again |
+| **Deny** | Blocks it. Claude is told you said no and carries on |
+| **In terminal** | Hands the question back to Claude Code's own prompt |
+
+If you don't answer within 60 seconds, the question goes back to Claude Code's own prompt, so nothing gets stuck. Several requests at once are queued, and the bubble shows how many are waiting. Clawde also gets your attention when Claude has finished and is waiting for you, or has a question.
+
+**Connecting.** The installer can do this for you. Otherwise Clawde offers on first launch, or use **right-click → Permission requests → Connect to Claude Code**. This adds a small hook to `~/.claude/settings.json` on Windows and in WSL; a backup of your original file is saved as `settings.json.clawde-backup`. Sessions you start afterwards will use it. **Disconnect** removes the hook again.
+
+**Modes** (right-click → Permission requests):
+
+- **Ask me with Allow / Deny** (default): the bubble described above.
+- **Just let me know**: Clawde tells you Claude needs you, and you answer in Claude Code.
+- **Ignore them**: Clawde stays out of it.
+
+**How it works.** Claude Code runs `clawde-hook` for its [`PermissionRequest` and `Notification` hooks](https://code.claude.com/docs/en/hooks). The hook drops the request into `~/.clawde/bridge` and waits for Clawde's answer there. Using a shared folder means it works the same for Windows, WSL and the desktop app, with no network ports. If Clawde isn't running, the hook gives up within 3 seconds and Claude Code asks you as usual.
+
 ## Meeting notes
 
 <img src="docs/recording.gif" alt="Clawde recording" width="160" align="right">
@@ -202,7 +249,7 @@ See an [example of the notes](docs/example-notes.md) and [its transcript](docs/e
 
 ## Configuration
 
-`crab_config.json` is created next to `crab_pet.py` the first time Clawde runs. Edit it, then restart Clawde.
+Settings are saved in `%USERPROFILE%\.clawde\crab_config.json`. Most can be changed from the right-click menu; for the rest, edit the file and restart Clawde.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -220,6 +267,10 @@ See an [example of the notes](docs/example-notes.md) and [its transcript](docs/e
 | `whisper_model` | `"small"` | Speech model: `tiny`, `base`, `small`, `medium` or `large-v3` (bigger = more accurate, slower) |
 | `meeting_language` | `""` | Language code such as `"en"`, or blank to detect it automatically |
 | `keep_audio` | `false` | Keep the WAV recordings after the notes are written |
+| `approvals` | `"bubble"` | How to handle Claude Code permission requests: `bubble`, `notify` or `off` |
+| `approval_wait_sec` | `60` | How long the Allow/Deny bubble waits before handing back to Claude Code (reconnect after changing it) |
+| `sounds` | `true` | Chime when Claude needs you |
+| `check_updates` | `true` | Check GitHub once a day for a new version |
 
 ## How it works
 
@@ -243,6 +294,9 @@ See an [example of the notes](docs/example-notes.md) and [its transcript](docs/e
 | Clawde is too big or too small | Set `scale` (try `3` to `6`) |
 | A console window appears | Start Clawde with `pyw`, not `py` |
 | Clawde disappeared off-screen | Delete the `position` entry in `crab_config.json` and restart |
+| SmartScreen blocks the installer | Click **More info → Run anyway** (the installer isn't code-signed yet) |
+| No permission bubbles | Check **right-click → Permission requests** says *Disconnect* (meaning it's connected), then start a **new** Claude Code session. Sessions that were already open keep their old settings |
+| Bubbles work on Windows but not in WSL | The installed hook runs the Windows `clawde-hook.exe` from WSL, which needs WSL's Windows interop (on by default) |
 | Clawde says it needs extras to take meeting notes | Run `py -m pip install -r requirements-meetings.txt`, then restart Clawde |
 | Clawde doesn't offer to record a call | Check **Offer to take meeting notes** in the right-click menu. If your call app isn't detected, use **Record a meeting now** |
 | The "Others" track is silent | Clawde records your *default* speakers. Make the device your call plays through the default in Windows sound settings |
@@ -250,7 +304,11 @@ See an [example of the notes](docs/example-notes.md) and [its transcript](docs/e
 
 ## Uninstalling
 
-1. Right-click Clawde and choose **Goodbye**.
+**Installed with the installer:** open **Settings → Apps → Installed apps**, find **Clawde** and choose **Uninstall**. This also removes the Claude Code hook and the login shortcut. Your settings and meeting notes are kept; delete `%USERPROFILE%\.clawde` and `Documents\Clawde Meetings` if you want those gone too.
+
+**Running from source:**
+
+1. Right-click Clawde and choose **Permission requests → Disconnect from Claude Code**, then **Goodbye**.
 2. Remove the login shortcut, if you added it:
 
    ```powershell
@@ -263,9 +321,13 @@ See an [example of the notes](docs/example-notes.md) and [its transcript](docs/e
 
 ```text
 crab_pet.py              the app: sprite renderer, behaviour, activity watcher, chat
+claude_link.py           adds/removes the Claude Code hook, answers permission requests
+clawde_hook.py           the hook Claude Code runs (standard library only)
 meetings.py              call detection, recording, transcription, and the notes prompt
 requirements-meetings.txt  extras for meeting notes
-install_autostart.ps1    adds or removes the login shortcut
+packaging/               icon, PyInstaller + Inno Setup build (build.ps1, clawde.iss)
+.github/workflows/       builds the installer for each release
+install_autostart.ps1    adds or removes the login shortcut (source installs)
 Start Clawde.bat         double-click launcher
 tools/make_docs_images.py  regenerates the images in docs/
 docs/                    README images
@@ -276,6 +338,24 @@ The sprite is drawn in code on a 32×32 grid (see `render()` and `pose_params()`
 ```powershell
 py crab_pet.py --preview poses.png
 ```
+
+### Building the installer
+
+```powershell
+py -m pip install -r requirements-meetings.txt pyinstaller pillow
+winget install JRSoftware.InnoSetup
+powershell -ExecutionPolicy Bypass -File packaging\build.ps1
+```
+
+The installer lands in `build\installer\`.
+
+### Releasing
+
+1. Bump `__version__` in `crab_pet.py`.
+2. Commit, then tag and push: `git tag v0.2.0` then `git push origin v0.2.0`.
+3. GitHub Actions builds `Clawde-Setup-<version>.exe` and attaches it to a new release. Installed copies of Clawde will offer the update within a day.
+
+### README images
 
 To regenerate the README images (this needs Pillow, for docs only):
 
@@ -289,6 +369,8 @@ py tools/make_docs_images.py
 - Clawde reads your Claude Code transcript files **locally**, only to tell whether a session is busy. Their contents never leave your machine.
 - With `ai_tips` on, the **title of your active window** is sent to Claude when it looks like you need help. Window titles can contain email subjects, document names or URLs. Turn this off from the right-click menu, or set `"ai_tips": false`.
 - Chat messages go to Claude Code, exactly as if you'd typed them into `claude`.
+- **Permission requests** pass between Claude Code and Clawde only through files in `~/.clawde/bridge` on your PC, and are deleted once answered. Clawde opens no network ports.
+- The once-a-day update check asks GitHub for the latest release number and sends nothing about you. Set `check_updates` to `false` to turn it off.
 - **Meetings are only recorded after you click Record.** The audio never leaves your PC: transcription runs locally, and the recordings are deleted after the notes are written (unless `keep_audio` is on). The **transcript text** is sent to Claude to write the notes. Transcripts and notes stay in your meetings folder.
 
 ## License

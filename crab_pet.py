@@ -20,10 +20,13 @@ from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 
+import claude_link
 import meetings
 
+__version__ = "0.2.0"
+REPO = "JaymeAlann/clawde"
 HERE = Path(__file__).resolve().parent
-CONFIG_PATH = HERE / "crab_config.json"
+CONFIG_PATH = claude_link.DATA / "crab_config.json"
 DEFAULTS = {
     "name": "Clawde",
     "claude_mode": "auto",      # auto | windows | wsl
@@ -39,6 +42,12 @@ DEFAULTS = {
     "whisper_model": "small",   # tiny | base | small | medium | large-v3
     "meeting_language": "",     # blank = auto-detect, or e.g. "en"
     "keep_audio": False,        # keep the WAV files after transcribing
+    "approvals": "bubble",      # bubble = Allow/Deny from Clawde | notify = just tell me | off
+    "approval_wait_sec": 60,    # then Claude Code falls back to its own prompt
+    "sounds": True,
+    "hooks_offered": False,
+    "check_updates": True,
+    "last_update_check": 0,
 }
 NO_WINDOW = 0x08000000
 KEY = "#fe01fd"                 # transparent colour key
@@ -47,6 +56,10 @@ KEY = "#fe01fd"                 # transparent colour key
 
 def load_config():
     cfg = dict(DEFAULTS)
+    old = HERE / "crab_config.json"     # versions before 0.2 kept it next to the script
+    if not CONFIG_PATH.exists() and old.exists():
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_PATH.write_text(old.read_text(encoding="utf-8"), encoding="utf-8")
     try:
         cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
     except Exception:
@@ -58,6 +71,7 @@ def load_config():
 
 def save_config(cfg):
     try:
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     except Exception:
         pass
@@ -610,6 +624,10 @@ def pose_params(name, t, facing=1, look=0, blink=False):
     elif name == "alert":
         p.update(eyes="wide", mouth="open", fx=["bang"])
         p["r"] = ("up" if (t // 3) % 2 else "mid", False, 0)
+    elif name == "needs":
+        p.update(eyes="wide", mouth="open", bob=-((t // 2) % 2) * 2, fx=["bang"], legs=f"walk{(t // 2) % 2}")
+        p["l"] = ("up" if (t // 2) % 2 else "mid", False, 0)
+        p["r"] = ("mid" if (t // 2) % 2 else "up", False, 0)
     if blink and p["eyes"] == "open":
         p["eyes"] = "closed"
     return p
@@ -946,6 +964,12 @@ class CrabApp:
         self.meeting_jobs = []
         self.meeting_deps = None
 
+        # Claude Code permission requests
+        self.bridge = claude_link.Bridge()
+        self.perm_queue = []
+        self.perm_current = None
+        self.needs_until = 0
+
         cv = self.cv
         cv.bind("<ButtonPress-1>", self.on_press)
         cv.bind("<B1-Motion>", self.on_motion)
@@ -956,8 +980,16 @@ class CrabApp:
         self.walk_var = tk.BooleanVar(value=self.cfg.get("walk", True))
         self.tips_var = tk.BooleanVar(value=self.cfg.get("ai_tips", True))
         self.meet_var = tk.BooleanVar(value=self.cfg.get("meeting_notes", True))
+        self.approve_var = tk.StringVar(value=self.cfg.get("approvals", "bubble"))
+        self.sound_var = tk.BooleanVar(value=self.cfg.get("sounds", True))
 
-        self.say(f"Hi, I'm {self.cfg['name']}! Hover me for options, drag me anywhere.", 8)
+        if not self.cfg.get("hooks_offered") and not claude_link.hooks_installed(self.cfg.get("wsl_distro")):
+            self.say(f"Hi, I'm {self.cfg['name']}! Want me to show when Claude Code needs your permission, "
+                     "so you can Allow or Deny right from here?", 120, actions=[
+                         ("Connect me", lambda: self.connect_hooks(True)),
+                         ("No thanks", lambda: self.connect_hooks(False))])
+        else:
+            self.say(f"Hi, I'm {self.cfg['name']}! Hover me for options, drag me anywhere.", 8)
         self.tick()
         self.slow_tick()
 
@@ -991,11 +1023,119 @@ class CrabApp:
         m.add_command(label="Open meeting notes", command=self.open_meetings_folder)
         m.add_checkbutton(label="Offer to take meeting notes", variable=self.meet_var, command=self._toggle_meet)
         m.add_separator()
+        perms = tk.Menu(m, tearoff=0)
+        for value, label in (("bubble", "Ask me with Allow / Deny"), ("notify", "Just let me know"),
+                             ("off", "Ignore them")):
+            perms.add_radiobutton(label=label, value=value, variable=self.approve_var, command=self._set_approvals)
+        perms.add_separator()
+        if claude_link.hooks_installed(self.cfg.get("wsl_distro")):
+            perms.add_command(label="Disconnect from Claude Code", command=self.disconnect_hooks)
+        else:
+            perms.add_command(label="Connect to Claude Code", command=lambda: self.connect_hooks(True))
+        m.add_cascade(label="Permission requests", menu=perms)
+        m.add_checkbutton(label="Sounds", variable=self.sound_var, command=self._toggle_sound)
+        m.add_separator()
         m.add_checkbutton(label="Wander around", variable=self.walk_var, command=self._toggle_walk)
         m.add_checkbutton(label="Smart tips (asks Claude)", variable=self.tips_var, command=self._toggle_tips)
         m.add_command(label="Take a nap", command=self._nap)
         m.add_separator()
+        m.add_command(label=f"About {self.cfg['name']} {__version__}",
+                      command=lambda: os.startfile(f"https://github.com/{REPO}"))
         m.add_command(label="Goodbye", command=self.quit)
+
+    def _set_approvals(self):
+        self.cfg["approvals"] = self.approve_var.get()
+        save_config(self.cfg)
+
+    def _toggle_sound(self):
+        self.cfg["sounds"] = self.sound_var.get()
+        save_config(self.cfg)
+
+    def chime(self):
+        if self.cfg.get("sounds", True):
+            try:
+                import winsound
+                winsound.MessageBeep(winsound.MB_ICONASTERISK)
+            except Exception:
+                pass
+
+    # ---------------- Claude Code permission requests
+    def connect_hooks(self, yes):
+        self.cfg["hooks_offered"] = True
+        save_config(self.cfg)
+        if not yes:
+            self.say("No problem! You can connect me later from my right-click menu.", 6)
+            return
+        results = claude_link.install_hooks(self.cfg.get("approval_wait_sec", 60), self.cfg.get("wsl_distro"))
+        bad = [f"{p}: {e}" for p, e in results if e]
+        if bad:
+            self.say("I couldn't update some Claude Code settings:\n" + "\n".join(bad), 20)
+        else:
+            self.react("happy", 2)
+            self.say("Connected! New Claude Code sessions will ask me when they need your permission.", 8)
+
+    def disconnect_hooks(self):
+        claude_link.uninstall_hooks(self.cfg.get("wsl_distro"))
+        self.say("Disconnected. Claude Code will ask in its own window again.", 6)
+
+    def poll_claude_requests(self):
+        mode = self.cfg.get("approvals", "bubble")
+        wait = int(self.cfg.get("approval_wait_sec", 60))
+        for req in self.bridge.poll(mode, wait):
+            event = req.get("hook_event_name")
+            project = claude_link.project_name(req)
+            if event == "PermissionRequest":
+                if mode == "bubble":
+                    self.perm_queue.append(req)
+                elif mode == "notify":
+                    verb, _ = claude_link.describe(req)
+                    self.needs_you(f"{project}: Claude wants to {verb} and needs your OK.")
+            elif event == "Notification" and mode != "off":
+                kind = req.get("notification_type")
+                if kind == "permission_prompt" and not self.perm_current and mode == "bubble":
+                    self.needs_you(f"{project}: Claude is waiting for your permission in its window.")
+                elif kind == "idle_prompt":
+                    self.needs_you(f"{project}: Claude is done and waiting for you.", chime=False)
+                elif kind in ("elicitation_dialog", "agent_needs_input"):
+                    self.needs_you(f"{project}: Claude has a question for you.")
+
+        if self.perm_current and not self.bridge.waiting(self.perm_current["_id"]):
+            self.perm_current = None          # answered in the terminal, or timed out
+            self.bubble.hide()
+        if not self.perm_current and self.perm_queue:
+            self.show_permission(self.perm_queue.pop(0))
+
+    def needs_you(self, text, chime=True):
+        self.needs_until = time.time() + 6
+        self.force_sleep = False
+        if chime:
+            self.chime()
+        self.say(text, 20)
+
+    def show_permission(self, req):
+        self.perm_current = req
+        self.force_sleep = False
+        verb, detail = claude_link.describe(req)
+        more = f"  (+{len(self.perm_queue)} more)" if self.perm_queue else ""
+        text = f"{claude_link.project_name(req)}: Claude wants to {verb}{more}"
+        if detail:
+            text += f"\n\n{detail}"
+        rid = req["_id"]
+        actions = [("Allow", lambda: self.answer(rid, {"behavior": "allow"}))]
+        suggestions = req.get("permission_suggestions")
+        if suggestions:
+            actions.append(("Always allow", lambda: self.answer(
+                rid, {"behavior": "allow", "updatedPermissions": suggestions})))
+        actions += [("Deny", lambda: self.answer(rid, {"behavior": "deny", "message": "The user denied this from Clawde."})),
+                    ("In terminal", lambda: self.answer(rid, None))]
+        self.chime()
+        self.bubble.show(text, int(self.cfg.get("approval_wait_sec", 60)), actions=actions)
+
+    def answer(self, rid, decision):
+        self.bridge.respond(rid, decision or {"behavior": "defer"})
+        self.perm_current = None
+        if decision and decision["behavior"] == "allow":
+            self.react("happy", 1.2)
 
     def quit(self):
         if self.recorder:
@@ -1100,8 +1240,10 @@ class CrabApp:
                  actions=[("Record & take notes", lambda: self.start_recording(app, auto=True)),
                           ("Not this time", lambda: None)])
 
-    def say(self, text, secs=12, on_click=None):
-        self.bubble.show(text, secs, on_click)
+    def say(self, text, secs=12, on_click=None, actions=None, urgent=False):
+        if self.perm_current and not urgent:
+            return                      # never cover a pending Allow/Deny
+        self.bubble.show(text, secs, on_click, actions)
 
     def react(self, pose, secs):
         self.react_pose, self.react_until = pose, time.time() + secs
@@ -1168,6 +1310,8 @@ class CrabApp:
         now = time.time()
         if self.dragging:
             return "drag"
+        if self.perm_current or now < self.needs_until:
+            return "needs"
         if now < self.react_until:
             return self.react_pose
         act = self.watcher.status
@@ -1282,6 +1426,8 @@ class CrabApp:
         now = time.time()
         while not self.events.empty():
             self.handle_event(self.events.get())
+        if self.t % 2 == 0:
+            self.poll_claude_requests()
 
         pose = self.decide()
         if pose == "sleep" and self.pose != "sleep":
@@ -1332,6 +1478,10 @@ class CrabApp:
         self.root.lift()
         if self.bubble.visible:
             self.bubble.win.lift()
+        if self.cfg.get("check_updates", True) and now - self.cfg.get("last_update_check", 0) > 86400:
+            self.cfg["last_update_check"] = now
+            save_config(self.cfg)
+            threading.Thread(target=self._check_update, daemon=True).start()
         try:
             self.meeting_tick()
         except Exception as e:
@@ -1396,8 +1546,28 @@ class CrabApp:
         text, _, err = self.claude.ask(prompt, model="haiku", timeout=90)
         self.events.put(("tip", text if text and not err else None, ctx))
 
+    def _check_update(self):
+        import urllib.request
+        try:
+            req = urllib.request.Request(f"https://api.github.com/repos/{REPO}/releases/latest",
+                                         headers={"User-Agent": "clawde"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                rel = json.loads(r.read().decode("utf-8"))
+        except Exception:
+            return
+
+        def ver(s):
+            return tuple(int(x) for x in re.findall(r"\d+", s)[:3])
+        tag = rel.get("tag_name") or ""
+        if tag and ver(tag) > ver(__version__):
+            self.events.put(("update", tag, rel.get("html_url") or f"https://github.com/{REPO}/releases"))
+
     def handle_event(self, ev):
         kind = ev[0]
+        if kind == "update":
+            self.say(f"A new version of me is out ({ev[1]})!", 60,
+                     actions=[("Download", lambda: os.startfile(ev[2])), ("Later", lambda: None)])
+            return
         if kind == "chat":
             self.chat.on_reply(*ev[1:])
             self.react("happy", 1.5)
@@ -1439,6 +1609,18 @@ def preview(path):
 def main():
     if "--preview" in sys.argv:
         preview(sys.argv[sys.argv.index("--preview") + 1])
+        return
+    if "--process-meeting" in sys.argv:
+        meetings.process(sys.argv[sys.argv.index("--process-meeting") + 1])
+        return
+    if "--install-hooks" in sys.argv:
+        cfg = load_config()
+        claude_link.install_hooks(cfg.get("approval_wait_sec", 60), cfg.get("wsl_distro"))
+        cfg["hooks_offered"] = True
+        save_config(cfg)
+        return
+    if "--uninstall-hooks" in sys.argv:
+        claude_link.uninstall_hooks(load_config().get("wsl_distro"))
         return
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)

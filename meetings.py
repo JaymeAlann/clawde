@@ -331,6 +331,9 @@ def process(folder):
 def start_processing(folder):
     """Run process() in a separate, windowless Python so Clawde stays smooth."""
     exe = Path(sys.executable)
+    if getattr(sys, "frozen", False):           # the installed Clawde.exe
+        subprocess.Popen([str(exe), "--process-meeting", str(folder)], creationflags=NO_WINDOW)
+        return
     pyw = exe.with_name("pythonw.exe")
     subprocess.Popen([str(pyw if pyw.exists() else exe), str(HERE / "meetings.py"), "process", str(folder)],
                      creationflags=NO_WINDOW, cwd=str(HERE))
