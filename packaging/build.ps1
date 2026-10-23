@@ -4,7 +4,9 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-$py = if (Get-Command py -ErrorAction SilentlyContinue) { 'py' } else { 'python' }
+# on GitHub Actions use the Python that setup-python installed (the runner's `py` points elsewhere)
+$py = if ($env:pythonLocation) { Join-Path $env:pythonLocation 'python.exe' }
+      elseif (Get-Command py -ErrorAction SilentlyContinue) { 'py' } else { 'python' }
 $version = (Select-String -Path crab_pet.py -Pattern '^__version__ = "(.+)"').Matches[0].Groups[1].Value
 Write-Output "Building Clawde $version"
 
