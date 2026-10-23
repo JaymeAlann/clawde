@@ -138,31 +138,47 @@ class Bridge:
         self.dirs = {n: BRIDGE / n for n in ("requests", "acks", "responses")}
         for d in self.dirs.values():
             d.mkdir(parents=True, exist_ok=True)
-            for f in d.iterdir():           # leftovers from a previous run
+        self.seen = set()
+        self.next_sweep = 0
+        self.sweep(600)                     # leftovers from a previous run, but not live requests
+
+    def sweep(self, older_than):
+        cutoff = time.time() - older_than
+        for d in self.dirs.values():
+            for f in d.iterdir():
                 try:
-                    f.unlink()
+                    if f.stat().st_mtime < cutoff:
+                        f.unlink()
                 except OSError:
                     pass
-        self.seen = set()
 
     def poll(self, mode, wait):
         """New hook requests, oldest first. Permission requests get an ack right away."""
         out = []
+        now = time.time()
+        if now > self.next_sweep:
+            self.next_sweep = now + 60
+            self.sweep(300)                 # answers nobody collected, abandoned requests
         try:
-            files = sorted(self.dirs["requests"].glob("*.json"), key=lambda p: p.stat().st_mtime)
+            files = sorted(((f, f.stat().st_mtime) for f in self.dirs["requests"].glob("*.json")),
+                           key=lambda x: x[1])
         except OSError:
             return out
-        for f in files:
+        for f, mtime in files:
             rid = f.stem
             if rid in self.seen:
                 continue
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
             except (OSError, ValueError):
-                continue                    # still being written
+                if now - mtime > 5:         # not "still being written": it's broken
+                    self.seen.add(rid)
+                continue
             self.seen.add(rid)
             data["_id"] = rid
             if data.get("hook_event_name") == "PermissionRequest":
+                if now - mtime > 2.5:
+                    continue                # the hook has stopped waiting for an ack
                 self._write("acks", rid, {"mode": mode, "wait": wait})
             else:
                 try:
@@ -176,7 +192,11 @@ class Bridge:
         return (self.dirs["requests"] / f"{rid}.json").exists()
 
     def respond(self, rid, decision):
+        """Answer a request. Returns False if the hook already gave up on it."""
+        if not self.waiting(rid):
+            return False
         self._write("responses", rid, decision)
+        return True
 
     def _write(self, kind, rid, data):
         path = self.dirs[kind] / f"{rid}.json"

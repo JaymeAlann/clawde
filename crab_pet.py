@@ -7,6 +7,7 @@ Run:  pyw crab_pet.py          (no console window)
 import ctypes
 import ctypes.wintypes as wt
 import json
+import math
 import os
 import queue
 import random
@@ -23,7 +24,7 @@ import tkinter as tk
 import claude_link
 import meetings
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 REPO = "JaymeAlann/clawde"
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = claude_link.DATA / "crab_config.json"
@@ -48,7 +49,9 @@ DEFAULTS = {
     "hooks_offered": False,
     "check_updates": True,
     "last_update_check": 0,
+    "baby_crabs": True,         # a little crab for each running subagent
 }
+MAX_BABIES = 5
 NO_WINDOW = 0x08000000
 KEY = "#fe01fd"                 # transparent colour key
 
@@ -247,6 +250,9 @@ class ActivityWatcher(threading.Thread):
         self.files = {}         # path -> mtime
         self.cache = {}         # path -> (mtime, kind)
         self.next_list = {}
+        self.agents = []        # live subagents: [{"id", "type", "description"}], oldest first
+        self.meta = {}          # subagent path -> its .meta.json
+        self.first_seen = {}
 
     def _find_wsl_roots(self):
         for base in (rf"\\wsl.localhost\{self.distro}\home", rf"\\wsl$\{self.distro}\home"):
@@ -319,6 +325,49 @@ class ActivityWatcher(threading.Thread):
                 return {"tool_use": "working", "thinking": "thinking"}.get(last, "text")
         return "idle"
 
+    def _finished(self, path, mtime):
+        """A subagent is done once it hands back (SubagentHandback) or ends its turn with a reply."""
+        key = ("done", path)
+        cached = self.cache.get(key)
+        if cached and cached[0] == mtime:
+            return cached[1]
+        done = False
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 32768))
+                lines = f.read().decode("utf-8", "replace").splitlines()
+        except OSError:
+            lines = []
+        for line in reversed(lines[-6:]):
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            msg = rec.get("message") if isinstance(rec, dict) else None
+            if not isinstance(msg, dict) or rec.get("type") != "assistant":
+                continue
+            content = msg.get("content") or []
+            if any(isinstance(c, dict) and c.get("name") == "SubagentHandback" for c in content):
+                done = True
+            elif msg.get("stop_reason") == "end_turn":
+                done = True
+            break
+        self.cache[key] = (mtime, done)
+        return done
+
+    def _agent(self, path):
+        if path not in self.meta:
+            try:
+                with open(path[:-len(".jsonl")] + ".meta.json", encoding="utf-8") as f:
+                    self.meta[path] = json.load(f)
+            except (OSError, ValueError):
+                self.meta[path] = {}
+        m = self.meta[path]
+        return {"id": path, "type": m.get("agentType") or "general-purpose",
+                "description": m.get("description") or "Helping Claude",
+                "since": self.first_seen.setdefault(path, time.time())}
+
     def run(self):
         self._find_wsl_roots()
         while True:
@@ -327,10 +376,11 @@ class ActivityWatcher(threading.Thread):
                 key = str(root)
                 if now >= self.next_list.get(key, 0):
                     remote = key.startswith("\\\\")
-                    self.next_list[key] = now + (15 if remote else 5)
+                    self.next_list[key] = now + (10 if remote else 3)   # new subagents show up this fast
                     for p in self._list(root):
                         self.files.setdefault(p, 0)
             working = thinking = False
+            agents = []
             for p in list(self.files):
                 try:
                     m = os.stat(p).st_mtime
@@ -350,7 +400,11 @@ class ActivityWatcher(threading.Thread):
                     working = True
                 elif kind == "thinking" and age < 300:
                     thinking = True
+                if "subagents" in p and age < 180 and not self._finished(p, m):
+                    agents.append(self._agent(p))
             self.status = "working" if working else "thinking" if thinking else "idle"
+            agents.sort(key=lambda a: a["since"])
+            self.agents = agents
             time.sleep(1.5)
 
 # ---------------------------------------------------------------- sprite
@@ -551,6 +605,22 @@ def render(p):
         for c in bang | dot:
             put(*c, "#ffd84a")
 
+    if p.get("balls"):
+        # juggling: balls loop over the top from the left claw to the right, then back low
+        for i, col in enumerate(p["balls"][:3]):
+            u = ((t / 14) + i / 3) % 1
+            if u < 0.6:
+                v = u / 0.6
+                bx, by = 3 + 24 * v, y0 - 9 - 9 * (1 - (2 * v - 1) ** 2)
+            else:
+                v = (u - 0.6) / 0.4
+                bx, by = 27 - 24 * v, y0 - 9
+            ball = {(int(bx) + dx, int(by) + dy) for dx in (0, 1) for dy in (0, 1)}
+            for c in outline_of(ball):
+                put(*c, O)
+            for c in ball:
+                put(*c, col)
+
     if p.get("rec"):
         # headphones and a blinking REC light
         band = {(x, y0 - 10) for x in range(11, 21)} | {(10, y0 - 9), (21, y0 - 9), (9, y0 - 8), (22, y0 - 8)}
@@ -572,7 +642,46 @@ def render(p):
     sx = p.get("shift", 0)
     if sx:
         px = {(x + sx, y): c for (x, y), c in px.items() if 0 <= x + sx < 32}
+    pal = p.get("palette")
+    if pal:
+        swap = {C: pal[0], H: pal[1], D: pal[2]}
+        px = {k: swap.get(c, c) for k, c in px.items()}
     return px
+
+
+# baby crab colours by subagent type: (shell, highlight, shade)
+BABY_PALETTES = {
+    "general-purpose": ("#f59a4a", "#ffc58f", "#c46b22"),
+    "Explore": ("#3f8fe0", "#86bfff", "#2a62a8"),
+    "Plan": ("#3fb26b", "#86e3a8", "#2a7a49"),
+    "claude-code-guide": ("#9b6bdf", "#c7a6ff", "#6c45a8"),
+}
+EXTRA_PALETTES = [("#ec5f9a", "#ff9cc6", "#b23a6e"), ("#2bb5a8", "#7fe6db", "#1d8077"),
+                  ("#e0b53a", "#ffe08a", "#a8821f"), ("#7a8496", "#b4bccb", "#535b6b")]
+
+
+def palette_for(agent_type):
+    if agent_type in BABY_PALETTES:
+        return BABY_PALETTES[agent_type]
+    return EXTRA_PALETTES[sum(map(ord, agent_type)) % len(EXTRA_PALETTES)]
+
+
+def paint(cv, px, S, tag="sprite"):
+    """Draw a pixel dict on a canvas, merging same-colour runs into one rectangle."""
+    cv.delete(tag)
+    rows = {}
+    for (x, y), c in px.items():
+        rows.setdefault(y, []).append((x, c))
+    for y, cells in rows.items():
+        cells.sort()
+        start, prev, col = cells[0][0], cells[0][0], cells[0][1]
+        for x, c in cells[1:] + [(None, None)]:
+            if x is not None and x == prev + 1 and c == col:
+                prev = x
+                continue
+            cv.create_rectangle(start * S, y * S, (prev + 1) * S, (y + 1) * S, fill=col, outline="", tags=tag)
+            if x is not None:
+                start, prev, col = x, x, c
 
 
 def pose_params(name, t, facing=1, look=0, blink=False):
@@ -624,6 +733,10 @@ def pose_params(name, t, facing=1, look=0, blink=False):
     elif name == "alert":
         p.update(eyes="wide", mouth="open", fx=["bang"])
         p["r"] = ("up" if (t // 3) % 2 else "mid", False, 0)
+    elif name == "juggle":
+        p.update(eyes="open", look=((t // 6) % 3) - 1, mouth="open", bob=(t // 4) % 2)
+        p["l"] = ("up" if (t // 4) % 2 else "mid", False, 0)
+        p["r"] = ("mid" if (t // 4) % 2 else "up", False, 0)
     elif name == "needs":
         p.update(eyes="wide", mouth="open", bob=-((t // 2) % 2) * 2, fx=["bang"], legs=f"walk{(t // 2) % 2}")
         p["l"] = ("up" if (t // 2) % 2 else "mid", False, 0)
@@ -866,6 +979,86 @@ class ChatWindow:
             self._write("\nClaude: ", "claude")
             self._write(text + "\n")
 
+# ---------------------------------------------------------------- baby crabs
+
+class BabyCrab:
+    """A small crab in its own window for one running subagent. It hatches from
+    Clawde, works on a tiny laptop beside him, then waves and scuttles home."""
+
+    def __init__(self, app, agent, slot):
+        self.app, self.agent, self.slot = app, agent, slot
+        self.palette = palette_for(agent["type"])
+        self.S = max(2, app.S // 2)
+        self.size = 32 * self.S
+        w = self.win = tk.Toplevel(app.root)
+        w.overrideredirect(True)
+        w.attributes("-topmost", True)
+        w.config(bg=KEY)
+        w.attributes("-transparentcolor", KEY)
+        self.cv = tk.Canvas(w, width=self.size, height=self.size, bg=KEY, highlightthickness=0, cursor="hand2")
+        self.cv.pack()
+        self.cv.bind("<Button-1>", lambda e: app.describe_baby(self))
+        self.x, self.y = (float(v) for v in app.baby_home(self.size))
+        self.born = app.t
+        self.leave_at = None
+        self.gone = False
+        self.last_px = None
+        self.phase = random.randint(0, 20)
+        w.geometry(f"{self.size}x{self.size}+{int(self.x)}+{int(self.y)}")
+
+    @property
+    def leaving(self):
+        return self.leave_at is not None
+
+    def leave(self):
+        if not self.leaving:
+            self.leave_at = self.app.t
+
+    def step(self):
+        a = self.app
+        age = a.t - self.born
+        t = a.t + self.phase
+        home = a.baby_home(self.size)
+        if self.leaving and a.t - self.leave_at > 8:
+            tx, ty = home                               # waved goodbye; head home
+        else:
+            tx, ty = a.baby_slot(self.slot, self.size)
+        k = 0.18 if age < 8 else 0.3
+        self.x += (tx - self.x) * k
+        self.y += (ty - self.y) * k
+        hop = -int(math.sin(age / 10 * math.pi) * 6 * self.S) if age < 10 else 0
+
+        if self.leaving:
+            if a.t - self.leave_at <= 8:
+                p = pose_params("wave", t)
+            else:
+                p = pose_params("happy", t)
+                p["fx"] = ["sparkles"]
+                if abs(tx - self.x) < 3 and abs(ty - self.y) < 3:
+                    self.destroy()
+                    return
+        elif age < 10:
+            p = pose_params("happy", t)
+            p["fx"] = []
+        else:
+            p = pose_params("work", t)
+        p["palette"] = self.palette
+        px = render(p)
+        if px != self.last_px:
+            self.last_px = px
+            paint(self.cv, px, self.S)
+        self.win.geometry(f"+{int(self.x)}+{int(self.y + hop)}")
+
+    def contains(self, x, y):
+        return self.x <= x < self.x + self.size and self.y + self.size * 0.4 <= y < self.y + self.size
+
+    def destroy(self):
+        self.gone = True
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass
+
 # ---------------------------------------------------------------- the pet
 
 LOCAL_TIPS = [
@@ -970,6 +1163,11 @@ class CrabApp:
         self.perm_current = None
         self.needs_until = 0
 
+        # baby crabs for subagents
+        self.babies = []
+        self.badge_drawn = None
+        self.hover_baby = None
+
         cv = self.cv
         cv.bind("<ButtonPress-1>", self.on_press)
         cv.bind("<B1-Motion>", self.on_motion)
@@ -982,6 +1180,7 @@ class CrabApp:
         self.meet_var = tk.BooleanVar(value=self.cfg.get("meeting_notes", True))
         self.approve_var = tk.StringVar(value=self.cfg.get("approvals", "bubble"))
         self.sound_var = tk.BooleanVar(value=self.cfg.get("sounds", True))
+        self.baby_var = tk.BooleanVar(value=self.cfg.get("baby_crabs", True))
 
         if not self.cfg.get("hooks_offered") and not claude_link.hooks_installed(self.cfg.get("wsl_distro")):
             self.say(f"Hi, I'm {self.cfg['name']}! Want me to show when Claude Code needs your permission, "
@@ -1034,6 +1233,7 @@ class CrabApp:
             perms.add_command(label="Connect to Claude Code", command=lambda: self.connect_hooks(True))
         m.add_cascade(label="Permission requests", menu=perms)
         m.add_checkbutton(label="Sounds", variable=self.sound_var, command=self._toggle_sound)
+        m.add_checkbutton(label="Baby crabs for subagents", variable=self.baby_var, command=self._toggle_babies)
         m.add_separator()
         m.add_checkbutton(label="Wander around", variable=self.walk_var, command=self._toggle_walk)
         m.add_checkbutton(label="Smart tips (asks Claude)", variable=self.tips_var, command=self._toggle_tips)
@@ -1045,6 +1245,10 @@ class CrabApp:
 
     def _set_approvals(self):
         self.cfg["approvals"] = self.approve_var.get()
+        save_config(self.cfg)
+
+    def _toggle_babies(self):
+        self.cfg["baby_crabs"] = self.baby_var.get()
         save_config(self.cfg)
 
     def _toggle_sound(self):
@@ -1102,6 +1306,7 @@ class CrabApp:
         if self.perm_current and not self.bridge.waiting(self.perm_current["_id"]):
             self.perm_current = None          # answered in the terminal, or timed out
             self.bubble.hide()
+        self.perm_queue = [r for r in self.perm_queue if self.bridge.waiting(r["_id"])]
         if not self.perm_current and self.perm_queue:
             self.show_permission(self.perm_queue.pop(0))
 
@@ -1132,9 +1337,11 @@ class CrabApp:
         self.bubble.show(text, int(self.cfg.get("approval_wait_sec", 60)), actions=actions)
 
     def answer(self, rid, decision):
-        self.bridge.respond(rid, decision or {"behavior": "defer"})
+        delivered = self.bridge.respond(rid, decision or {"behavior": "defer"})
         self.perm_current = None
-        if decision and decision["behavior"] == "allow":
+        if not delivered:
+            self.say("Too late, sorry! Claude Code already asked you in its own window.", 6)
+        elif decision and decision["behavior"] == "allow":
             self.react("happy", 1.2)
 
     def quit(self):
@@ -1314,6 +1521,8 @@ class CrabApp:
             return "needs"
         if now < self.react_until:
             return self.react_pose
+        if len(self.live_agents()) >= 3:
+            return "juggle"
         act = self.watcher.status
         if self.chat.busy and act == "idle":
             act = "thinking"
@@ -1348,27 +1557,78 @@ class CrabApp:
             nx = max(l, min(nx, r - self.W))
         self.root.geometry(f"+{nx}+{y}")
 
+    # ---------------- baby crabs
+    def live_agents(self):
+        return self.watcher.agents if self.cfg.get("baby_crabs", True) else []
+
+    def baby_home(self, size):
+        """Where babies hatch from and return to: Clawde's middle, feet level with his."""
+        rx, ry = self.root.winfo_x(), self.root.winfo_y()
+        bs = size // 32
+        return rx + self.W // 2 - size // 2, ry + 29 * self.S - 29 * bs
+
+    def baby_slot(self, slot, size):
+        """Spots alternate left and right of Clawde, moving outward; spots that would be
+        off-screen are skipped, so near an edge the babies line up on the other side."""
+        hx, hy = self.baby_home(size)
+        l, t, r, b = work_area(hx + size // 2, hy + size // 2)
+        spots = []
+        for ring in range(2 * MAX_BABIES):
+            dist = self.W * 0.42 + ring * size * 0.85 + size * 0.15
+            spots += [x for x in (hx - dist, hx + dist) if l <= x <= r - size]
+            if len(spots) > slot:
+                return spots[slot], hy
+        return max(l, min(hx, r - size)), hy
+
+    def update_babies(self):
+        agents = self.live_agents()
+        live = {a["id"] for a in agents}
+        for b in self.babies:
+            if b.agent["id"] not in live:
+                b.leave()
+        working = [b for b in self.babies if not b.leaving]
+        known = {b.agent["id"] for b in self.babies}
+        for a in agents:
+            if len(working) >= MAX_BABIES:
+                break
+            if a["id"] in known:
+                continue
+            free = sorted(set(range(MAX_BABIES)) - {b.slot for b in working})
+            baby = BabyCrab(self, a, free[0])
+            self.babies.append(baby)
+            working.append(baby)
+        for b in list(self.babies):
+            b.step()
+        self.babies = [b for b in self.babies if not b.gone]
+        self.draw_badge(max(0, len(agents) - len(working)))
+
+    def draw_badge(self, extra):
+        if extra == self.badge_drawn:
+            return
+        self.badge_drawn = extra
+        cv, S = self.cv, self.S
+        cv.delete("badge")
+        if not extra:
+            return
+        x1, y0 = self.W - S, 7 * S
+        tid = cv.create_text(x1 - S, y0 + S // 2, text=f"+{extra}", anchor="ne", fill="white",
+                             font=("Segoe UI Semibold", max(8, int(2.2 * S))), tags="badge")
+        bx0, by0, bx1, by1 = cv.bbox(tid)
+        cv.create_rectangle(bx0 - S, by0, bx1 + S, by1, fill=O, outline="#ffd84a", width=max(1, S // 3), tags="badge")
+        cv.tag_raise(tid)
+
+    def describe_baby(self, baby):
+        kind = baby.agent["type"].replace("-", " ")
+        self.say(f"Baby {kind} crab: {baby.agent['description']}", 5)
+
     # ---------------- drawing
     def draw_sprite(self, px):
         if px == self.last_px:
             return
         self.last_px = px
-        cv, S = self.cv, self.S
-        cv.delete("sprite")
-        rows = {}
-        for (x, y), c in px.items():
-            rows.setdefault(y, []).append((x, c))
-        for y, cells in rows.items():
-            cells.sort()
-            start, prev, col = cells[0][0], cells[0][0], cells[0][1]
-            for x, c in cells[1:] + [(None, None)]:
-                if x is not None and x == prev + 1 and c == col:
-                    prev = x
-                    continue
-                cv.create_rectangle(start * S, y * S, (prev + 1) * S, (y + 1) * S, fill=col, outline="", tags="sprite")
-                if x is not None:
-                    start, prev, col = x, x, c
-        cv.tag_raise("menu")
+        paint(self.cv, px, self.S)
+        self.cv.tag_raise("badge")
+        self.cv.tag_raise("menu")
 
     def draw_menu(self, visible, btn):
         state = (visible, btn)
@@ -1450,12 +1710,20 @@ class CrabApp:
         look = self.look if pose == "look" else 0
         params = pose_params(pose, self.t, self.facing, look, blink)
         params["rec"] = self.recorder is not None
+        if pose == "juggle":
+            params["balls"] = [palette_for(a["type"])[0] for a in self.live_agents()[:3]]
         self.draw_sprite(render(params))
+        self.update_babies()
 
         px, py = self.root.winfo_pointerxy()
         rx, ry = self.root.winfo_x(), self.root.winfo_y()
         if rx + 3 * self.S <= px < rx + self.W - 3 * self.S and ry + 6 * self.S <= py < ry + self.H:
             self.hover_until = now + 0.6
+        hovered = next((b for b in self.babies if not b.leaving and b.contains(px, py)), None)
+        if hovered is not self.hover_baby:
+            self.hover_baby = hovered
+            if hovered:
+                self.describe_baby(hovered)
         visible = now < self.hover_until and not self.dragging
         btn = None
         if visible and py >= ry + self.pet_h:
@@ -1478,6 +1746,8 @@ class CrabApp:
         self.root.lift()
         if self.bubble.visible:
             self.bubble.win.lift()
+        for b in self.babies:
+            b.win.attributes("-topmost", True)
         if self.cfg.get("check_updates", True) and now - self.cfg.get("last_update_check", 0) > 86400:
             self.cfg["last_update_check"] = now
             save_config(self.cfg)
@@ -1590,7 +1860,7 @@ def preview(path):
     root = tk.Tk()
     root.withdraw()
     poses = ["idle", "walk", "look", "wave", "dance", "bubble", "snap", "sleep", "think", "work", "drag", "happy",
-             "alert", "idle+rec", "work+rec"]
+             "alert", "needs", "idle+rec", "work+rec", "juggle", "work@general-purpose", "work@Explore", "work@Plan"]
     S, cols = 6, 5
     rows = (len(poses) + cols - 1) // cols
     img = tk.PhotoImage(width=cols * 32 * S, height=rows * 32 * S)
@@ -1598,8 +1868,12 @@ def preview(path):
     for n, name in enumerate(poses):
         ox, oy = (n % cols) * 32 * S, (n // cols) * 32 * S
         img.put("#eef1f5" if (n % 2) else "#e4e8ee", to=(ox, oy, ox + 32 * S, oy + 32 * S))
-        p = pose_params(name.split("+")[0], 4, 1, 1)
+        p = pose_params(name.split("+")[0].split("@")[0], 4, 1, 1)
         p["rec"] = name.endswith("+rec")
+        if "@" in name:
+            p["palette"] = palette_for(name.split("@")[1])
+        if name == "juggle":
+            p["balls"] = [palette_for(k)[0] for k in ("Explore", "Plan", "general-purpose")]
         for (x, y), c in render(p).items():
             img.put(c, to=(ox + x * S, oy + y * S, ox + (x + 1) * S, oy + (y + 1) * S))
     img.write(path, format="png")

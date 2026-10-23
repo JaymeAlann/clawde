@@ -2,6 +2,7 @@
 
     py tools/make_docs_images.py
 """
+import math
 import sys
 from pathlib import Path
 
@@ -9,17 +10,23 @@ from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from crab_pet import pose_params, render  # noqa: E402
+from crab_pet import palette_for, pose_params, render  # noqa: E402
 
 DOCS = ROOT / "docs"
 FRAME_MS = 120
 
 
-def sprite(pose, t, scale, look=0, rec=False):
+def sprite(pose, t, scale, look=0, rec=False, palette=None, balls=None, fx=None):
     img = Image.new("RGBA", (32 * scale, 32 * scale), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     p = pose_params(pose, t, 1, look)
     p["rec"] = rec
+    if palette:
+        p["palette"] = palette
+    if balls:
+        p["balls"] = balls
+    if fx is not None:
+        p["fx"] = fx
     for (x, y), c in render(p).items():
         d.rectangle([x * scale, y * scale, (x + 1) * scale - 1, (y + 1) * scale - 1], fill=c)
     return img
@@ -144,6 +151,40 @@ def permission_card():
     frames[0].save(DOCS / "permission.gif", save_all=True, append_images=frames[1:], duration=FRAME_MS, loop=0)
 
 
+def babies():
+    """Clawde hatches three subagent babies, juggles while they work, then they wave."""
+    S, bs = 7, 4
+    Wd, Ht = 760, 300
+    kinds = ["Explore", "Plan", "general-purpose"]
+    pals = [palette_for(k) for k in kinds]
+    cx, ground = Wd // 2, Ht - 14
+    home = (cx - 16 * bs, ground - 30 * bs)
+    slots = [cx - 16 * S - 30 * bs, cx + 16 * S - 2 * bs, cx - 16 * S - 62 * bs]
+    frames = []
+    for t in range(48):
+        img = Image.new("RGBA", (Wd, Ht), (0, 0, 0, 0))
+        if t < 12:
+            mom = sprite("happy", t, S, fx=[])
+        elif t < 40:
+            mom = sprite("juggle", t, S, balls=[p[0] for p in pals])
+        else:
+            mom = sprite("happy", t, S)
+        img.alpha_composite(mom, (cx - 16 * S, ground - 30 * S))
+        for i, pal in enumerate(pals):
+            born = i * 3
+            if t < born:
+                continue
+            age = t - born
+            f = min(1, age / 9)
+            x = int(home[0] + (slots[i] - home[0]) * f)
+            hop = int(math.sin(min(age, 9) / 9 * math.pi) * 22)
+            pose = "happy" if age < 9 else ("wave" if t >= 40 else "work")
+            baby = sprite(pose, t + i * 5, bs, palette=pal, fx=[] if pose == "happy" else None)
+            img.alpha_composite(baby, (x, home[1] - hop))
+        frames.append(img)
+    save_gif(frames, DOCS / "babies.gif")
+
+
 def menu_closeup():
     S = 8
     img = Image.new("RGBA", (32 * S, 44 * S), (0, 0, 0, 0))
@@ -159,6 +200,7 @@ def main():
         save_gif([sprite(pose, t, 5) for t in range(24)], DOCS / f"{pose}.gif")
     save_gif([sprite("idle", t, 5, rec=True) for t in range(24)], DOCS / "recording.gif")
     hero()
+    babies()
     permission_card()
     menu_closeup()
     print("wrote", sorted(p.name for p in DOCS.iterdir()))

@@ -20,6 +20,7 @@
 - [Installation](#installation)
 - [Using Clawde](#using-clawde)
 - [Permission requests](#permission-requests)
+- [Baby crabs](#baby-crabs)
 - [Meeting notes](#meeting-notes)
 - [Configuration](#configuration)
 - [How it works](#how-it-works)
@@ -37,6 +38,7 @@
 - 😴 **Naps.** After a few minutes with no keyboard or mouse input it falls asleep, and it wakes up happy when you come back.
 - 🤩 **Gets excited when Claude is thinking.** Whenever *any* Claude Code session has just been given a prompt.
 - 💻 **Pulls out a laptop when Claude is working.** Whenever *any* Claude Code session is running tools, on Windows or in WSL. It celebrates when the work is done.
+- 🐣 **Baby crabs for subagents.** Each helper agent Claude sends off hatches as a little crab, coloured by its job, typing on a tiny laptop beside Clawde. Three or more and Clawde starts juggling.
 - ✋ **Allow or Deny from the crab.** When any Claude Code session needs your permission, Clawde jumps up with the request and **Allow / Always allow / Deny** buttons, so you don't have to find the right terminal.
 - 💡 **Offers help.** When it looks like you're stuck, Clawde pops up with a short tip from Claude.
 - 🎙️ **Voice chat with Claude Code.** Hover the crab, press the microphone button, and talk.
@@ -53,6 +55,10 @@
 | :---: | :---: | :---: | :---: | :---: | :---: |
 | ![drag](docs/drag.gif) | ![happy](docs/happy.gif) | ![dance](docs/dance.gif) | ![bubble](docs/bubble.gif) | ![alert](docs/alert.gif) | ![recording](docs/recording.gif) |
 | Click and hold | Clicked, or Claude finished | Random | Random | Thinks you need help | Taking meeting notes |
+
+And with the family ([more below](#baby-crabs)):
+
+![Clawde hatching three baby crabs and juggling](docs/babies.gif)
 
 All the poses on one sheet:
 
@@ -167,7 +173,7 @@ This installs PyAudioWPatch (to record audio), numpy, and faster-whisper (speech
 | **Click and hold** | Drag Clawde anywhere, across monitors |
 | **Click** | Clawde is happy to see you (and wakes up if it was asleep) |
 | **Click a speech bubble** | Opens the chat about that tip |
-| **Right-click** | Menu: type to chat, open the CLI, record a meeting, open your meeting notes, turn features on/off, take a nap, quit |
+| **Right-click** | Menu: type to chat, open the CLI, record a meeting, open your meeting notes, permission-request mode, turn features on/off (wandering, tips, sounds, baby crabs), take a nap, quit |
 
 **The chat window** keeps the conversation going until you press **New chat**. Each message is sent with `claude -p --resume <session>`, so Claude Code remembers what you said earlier. You can also type and press Enter instead of talking.
 
@@ -206,6 +212,33 @@ If you don't answer within 60 seconds, the question goes back to Claude Code's o
 - **Ignore them**: Clawde stays out of it.
 
 **How it works.** Claude Code runs `clawde-hook` for its [`PermissionRequest` and `Notification` hooks](https://code.claude.com/docs/en/hooks). The hook drops the request into `~/.clawde/bridge` and waits for Clawde's answer there. Using a shared folder means it works the same for Windows, WSL and the desktop app, with no network ports. If Clawde isn't running, the hook gives up within 3 seconds and Claude Code asks you as usual.
+
+## Baby crabs
+
+When Claude Code sends off a subagent (a helper that searches code, plans, or works on part of a task), a baby crab hatches from Clawde:
+
+1. **🥚 Hatch:** it hops out of Clawde and takes a spot beside him.
+2. **💻 Work:** it types on its own tiny laptop while its subagent runs, and follows Clawde if he walks or you drag him.
+3. **👋 Done:** when the subagent finishes, it waves, scuttles back into Clawde and disappears in a sparkle.
+
+**Colour shows the job:**
+
+| Colour | Subagent type |
+| --- | --- |
+| 🔵 Blue | `Explore` (searching code) |
+| 🟢 Green | `Plan` (designing an approach) |
+| 🟠 Orange | `general-purpose` (everything else) |
+| 🟣 Purple | `claude-code-guide` |
+| Pink, teal, gold or grey | Your own custom agent types (each type always gets the same colour) |
+
+Hover over or click a baby to see what it's working on, for example *"Baby Explore crab: Search for config keys"*.
+
+- **🤹 Juggling:** with 3 or more babies out, Clawde juggles balls in their colours.
+- **+N badge:** at most 5 babies are shown at once. Any extra show as a **+N** badge on Clawde, and they hatch as soon as there's room.
+- **Near a screen edge**, the babies line up on the side with space.
+- **Turn them off** with **right-click → Baby crabs for subagents**.
+
+Babies only appear for subagents. Separate Claude Code sessions are represented by Clawde himself. Clawde finds subagents from the logs Claude Code already writes (`~/.claude/projects/<project>/<session>/subagents/`), so this needs no setup.
 
 ## Meeting notes
 
@@ -271,6 +304,7 @@ Settings are saved in `%USERPROFILE%\.clawde\crab_config.json`. Most can be chan
 | `approval_wait_sec` | `60` | How long the Allow/Deny bubble waits before handing back to Claude Code (reconnect after changing it) |
 | `sounds` | `true` | Chime when Claude needs you |
 | `check_updates` | `true` | Check GitHub once a day for a new version |
+| `baby_crabs` | `true` | Show a baby crab for each running subagent |
 
 ## How it works
 
